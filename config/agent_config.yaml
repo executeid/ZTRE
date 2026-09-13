@@ -1,0 +1,14 @@
+server:
+  metrics_port: 9090
+  health_port: 8080
+
+tetragon:
+  socket_path: "/var/run/tetragon/tetragon.sock"
+  reconnect_interval_ms: 2000
+  buffer_size: 50000
+
+decision_engine:
+  thresholds:
+    green_max: 39   # < 40 -> ALLOW_AND_LOG
+    yellow_max: 69  # 40-69 -> LOG_AND_ALERT
+    # >= 70 -> AUTO_CONTAINMENT

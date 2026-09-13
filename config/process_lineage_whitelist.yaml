@@ -1,0 +1,16 @@
+whitelisted_lineages:
+  - parent: nginx
+    allowed_children:
+      - nginx
+      - sh
+  - parent: java
+    allowed_children:
+      - java
+  - parent: postgres
+    allowed_children:
+      - postgres
+      - pg_dump
+  - parent: node
+    allowed_children:
+      - node
+      - npm

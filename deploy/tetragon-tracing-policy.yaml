@@ -1,0 +1,26 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: "sys-file-open-write"
+spec:
+  kprobes:
+    - call: "sys_openat"
+      syscall: true
+      args:
+        - index: 0
+          type: "int"
+        - index: 1
+          type: "string"
+        - index: 2
+          type: "int"
+      selectors:
+        - matchArgs:
+            - index: 1
+              operator: "Prefix"
+              values:
+                - "/etc/"
+    - call: "sys_close"
+      syscall: true
+      args:
+        - index: 0
+          type: "int"

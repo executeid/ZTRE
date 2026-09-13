@@ -40,12 +40,12 @@ Foundation  ──►  Event        ──►  Validation  ──►  Decision &
 
 | Item | Details |
 |---|---|
-| **Action** | Provision a development Kubernetes cluster (minikube, kind, or managed K8s) with minimum 1 control-plane + 2 worker nodes |
+| **Action** | Provision a development Kubernetes cluster (minikube, kind, or managed K8s) with minimum 1 control-plane + 1 worker nodes |
 | **Deliverable** | Working `kubeconfig` with cluster-admin access |
 | **Tools** | `kind` / `minikube` / `kubeadm` |
 
 **Tasks:**
-- [ ] Create cluster configuration manifest with 2 worker nodes
+- [ ] Create cluster configuration manifest with 1 worker nodes
 - [ ] Verify `kubectl cluster-info` returns healthy status
 - [ ] Create dedicated `ztre-system` namespace for agent deployment
 - [ ] Create dedicated `ztre-test` namespace for vulnerable test workloads
@@ -91,27 +91,28 @@ Foundation  ──►  Event        ──►  Validation  ──►  Decision &
 - [ ] Manual test: label a test pod with `ztre/quarantine=true`, confirm all traffic is blocked
 - [ ] Manual test: remove the label, confirm traffic resumes
 
-### Step 1.4 — ZTRE Python Project Scaffolding
+### Step 1.4 — ZTRE Go Project Scaffolding
 
 | Item | Details |
 |---|---|
-| **Action** | Initialize the ZTRE Python project with package structure, dependency management, and CI skeleton |
-| **Deliverable** | Repository with runnable skeleton, linting, and test harness |
+| **Action** | Initialize the ZTRE Go project with package structure, module management (`go.mod`), and CI skeleton |
+| **Deliverable** | Repository with runnable Go skeleton, linting, and test harness |
 
 **Tasks:**
 - [ ] Initialize project structure:
   ```
   ztre/
-  ├── src/ztre/
-  │   ├── __init__.py
-  │   ├── main.py              # Entrypoint
-  │   ├── collector/           # FR-01
-  │   ├── validator/           # FR-02
-  │   ├── risk_engine/         # FR-03
-  │   ├── decision_engine/     # FR-04
-  │   ├── containment/         # FR-05
-  │   ├── config/              # YAML policy loader
-  │   └── observability/       # Logging, metrics
+  ├── cmd/
+  │   └── ztre-agent/
+  │       └── main.go              # Entrypoint
+  ├── pkg/
+  │   ├── collector/               # FR-01 (Tetragon gRPC client)
+  │   ├── validator/               # FR-02 (Lineage validator)
+  │   ├── risk/                    # FR-03 (Risk scoring engine)
+  │   ├── decision/                # FR-04 (Decision engine)
+  │   ├── containment/             # FR-05 (K8s pod patcher)
+  │   ├── config/                  # YAML policy loader
+  │   └── observability/           # Logging & Prometheus metrics
   ├── config/
   │   ├── process_lineage_whitelist.yaml
   │   ├── risk_scoring_policy.yaml
@@ -121,13 +122,14 @@ Foundation  ──►  Event        ──►  Validation  ──►  Decision &
   │   ├── Dockerfile
   │   ├── daemonset.yaml
   │   └── rbac.yaml
-  ├── pyproject.toml
+  ├── go.mod
+  ├── go.sum
   └── README.md
   ```
-- [ ] Set up `pyproject.toml` with dependencies: `kubernetes`, `grpcio`, `pyyaml`, `prometheus-client`, `structlog`
-- [ ] Configure `pytest`, `ruff` (linter), `mypy` (type checks)
-- [ ] Write a minimal `main.py` that starts and logs "ZTRE Agent started"
-- [ ] Create `Dockerfile` (Python 3.12 slim base)
+- [ ] Set up `go.mod` with dependencies: `github.com/cilium/tetragon/api/v1/tetragon`, `k8s.io/client-go`, `gopkg.in/yaml.v3`, `github.com/prometheus/client_golang`, `go.uber.org/zap`
+- [ ] Configure `go test`, `golangci-lint`
+- [ ] Write a minimal `main.go` that starts and logs "ZTRE Agent started"
+- [ ] Create multi-stage `Dockerfile` (`golang:1.22-alpine` builder -> `gcr.io/distroless/static:nonroot`)
 
 ### Step 1.5 — RBAC & Service Account Configuration
 
@@ -149,10 +151,10 @@ Foundation  ──►  Event        ──►  Validation  ──►  Decision &
 
 | Criteria | Verified |
 |---|---|
-| K8s cluster running with 2 worker nodes | ☐ |
+| K8s cluster running with 1 worker node | ☐ |
 | Tetragon emitting JSON events from kernel probes | ☐ |
 | Cilium installed; quarantine policy blocks traffic when label applied | ☐ |
-| Python project skeleton builds and runs in Docker | ☐ |
+| Go project skeleton builds and runs in Docker | ☐ |
 | RBAC restricts agent to `patch pods` only | ☐ |
 
 ---
@@ -168,52 +170,52 @@ Foundation  ──►  Event        ──►  Validation  ──►  Decision &
 
 | Item | Details |
 |---|---|
-| **Action** | Implement a gRPC client that connects to the Tetragon event stream and receives raw events |
-| **Deliverable** | `TetragonClient` class with async streaming capability |
+| **Action** | Implement a gRPC client using official Tetragon Go SDK that connects to the Tetragon unix domain socket (`/var/run/tetragon/tetragon.sock`) |
+| **Deliverable** | `TetragonClient` struct with streaming capability via `tetragon.FineGuidanceSensorsClient` |
 
 **Tasks:**
-- [ ] Generate Python stubs from Tetragon protobuf definitions
-- [ ] Implement `TetragonClient` with gRPC `StreamEvents` call
-- [ ] Handle connection lifecycle: connect, reconnect on failure, backoff
+- [ ] Import official Tetragon client SDK (`github.com/cilium/tetragon/api/v1/tetragon`)
+- [ ] Implement `TetragonClient` connecting over `unix:///var/run/tetragon/tetragon.sock` using `GetEvents(ctx, &tetragon.GetEventsRequest{})`
+- [ ] Handle connection lifecycle: connect, reconnect on failure with exponential backoff
 - [ ] Unit test: mock gRPC server → client receives events
 
 ### Step 2.2 — Event Parser & Data Model
 
 | Item | Details |
 |---|---|
-| **Action** | Define the internal `SecurityEvent` data model and build a parser that extracts structured fields from raw Tetragon JSON/protobuf |
-| **Deliverable** | `SecurityEvent` dataclass, `EventParser` class |
+| **Action** | Define the internal `SecurityEvent` data model in Go and build a parser that extracts structured fields from `*tetragon.GetEventsResponse` |
+| **Deliverable** | `SecurityEvent` struct, `EventParser` interface and implementation |
 
 **Tasks:**
-- [ ] Define `SecurityEvent` dataclass:
-  ```python
-  @dataclass
-  class SecurityEvent:
-      timestamp: datetime
-      event_type: str        # execve, file_access, network
-      pid: int
-      binary: str            # e.g., "bash"
-      parent_binary: str     # e.g., "nginx"
-      namespace: str
-      pod_name: str
-      raw_event: dict        # full original payload
+- [ ] Define `SecurityEvent` struct:
+  ```go
+  type SecurityEvent struct {
+      Timestamp    time.Time
+      EventType    string    // execve, file_access, network
+      PID          uint32
+      Binary       string    // e.g., "bash"
+      ParentBinary string    // e.g., "nginx"
+      Namespace    string
+      PodName      string
+      RawResponse  *tetragon.GetEventsResponse
+  }
   ```
-- [ ] Implement `EventParser.parse(raw_event) -> SecurityEvent`
-- [ ] Handle malformed events gracefully (log warning, skip)
+- [ ] Implement `EventParser.Parse(res *tetragon.GetEventsResponse) (*SecurityEvent, error)`
+- [ ] Handle unhandled or filtered events gracefully (return nil/skip)
 - [ ] Unit tests with real Tetragon event samples (captured from Step 1.2)
 
 ### Step 2.3 — Event Buffer & Throughput Handling
 
 | Item | Details |
 |---|---|
-| **Action** | Add an in-memory async queue between the collector and the downstream pipeline to absorb event bursts |
-| **Deliverable** | Bounded `asyncio.Queue` with configurable size and overflow strategy |
+| **Action** | Add a buffered Go channel between the collector and downstream pipeline to absorb event bursts |
+| **Deliverable** | Bounded channel `chan *SecurityEvent` with configurable buffer size and overflow strategy |
 | **PRD Reference** | FR-01 acceptance: 10,000 events/sec without dropping |
 
 **Tasks:**
-- [ ] Implement bounded async queue (default size: 50,000)
-- [ ] Overflow strategy: log warning + increment `ztre_events_dropped_total` metric
-- [ ] Consumer coroutine that pulls from queue and forwards to validation pipeline
+- [ ] Implement bounded Go channel buffer (default capacity: 50,000)
+- [ ] Overflow strategy: non-blocking select drop, log warning + increment `ztre_events_dropped_total` metric
+- [ ] Worker goroutine pool pulling from channel and forwarding to validation pipeline
 - [ ] Load test: synthetic event generator → verify 10k events/sec throughput
 - [ ] Benchmark end-to-end latency: target < 500ms
 
@@ -221,15 +223,15 @@ Foundation  ──►  Event        ──►  Validation  ──►  Decision &
 
 | Item | Details |
 |---|---|
-| **Action** | Add structured logging and Prometheus metrics for the event ingestion layer |
-| **Deliverable** | `structlog` JSON logger, Prometheus counter `ztre_events_ingested_total` |
+| **Action** | Add structured logging (Zap / slog) and Prometheus metrics for the event ingestion layer |
+| **Deliverable** | Structured logger, Prometheus counter `ztre_events_ingested_total` |
 | **PRD Reference** | NFR-06 |
 
 **Tasks:**
-- [ ] Configure `structlog` with JSON output, timestamp, log level
+- [ ] Configure `zap` logger with JSON encoder, timestamp, log level
 - [ ] Register Prometheus counter: `ztre_events_ingested_total`
 - [ ] Register Prometheus histogram: `ztre_event_parse_duration_seconds`
-- [ ] Expose `/metrics` HTTP endpoint on port 9090
+- [ ] Expose `/metrics` HTTP endpoint on port 9090 using `promhttp.Handler()`
 - [ ] Integration test: ingest events → verify metrics increment
 
 ---
@@ -239,7 +241,7 @@ Foundation  ──►  Event        ──►  Validation  ──►  Decision &
 | Criteria | Verified |
 |---|---|
 | Agent connects to Tetragon gRPC stream and receives events | ☐ |
-| Events are parsed into `SecurityEvent` dataclass | ☐ |
+| Events are parsed into `SecurityEvent` struct | ☐ |
 | Pipeline handles 10,000 events/sec without dropping | ☐ |
 | Auto-reconnect works when Tetragon restarts | ☐ |
 | `/metrics` endpoint exposes `ztre_events_ingested_total` | ☐ |
@@ -439,20 +441,23 @@ Foundation  ──►  Event        ──►  Validation  ──►  Decision &
 | Item | Details |
 |---|---|
 | **Action** | For Red zone events (≥ 70), patch the target Pod with `ztre/quarantine: "true"` label via Kubernetes API |
-| **Deliverable** | `ContainmentExecutor` class |
+| **Deliverable** | `ContainmentExecutor` struct |
 | **Critical Constraint** | MUST NOT send SIGKILL — only label patching (NFR-01) |
 
 **Tasks:**
-- [ ] Implement `ContainmentExecutor.quarantine(namespace, pod_name)`
-- [ ] Use `kubernetes` Python client:
-  ```python
-  v1.patch_namespaced_pod(
-      name=pod_name,
-      namespace=namespace,
-      body={"metadata": {"labels": {"ztre/quarantine": "true"}}}
+- [ ] Implement `ContainmentExecutor.Quarantine(ctx context.Context, namespace, podName string) error`
+- [ ] Use official `k8s.io/client-go`:
+  ```go
+  patchData := []byte(`{"metadata":{"labels":{"ztre/quarantine":"true"}}}`)
+  _, err := clientset.CoreV1().Pods(namespace).Patch(
+      ctx,
+      podName,
+      types.StrategicMergePatchType,
+      patchData,
+      metav1.PatchOptions{},
   )
   ```
-- [ ] Retry logic: exponential backoff, initial delay 100ms, max 3 retries
+- [ ] Retry logic: exponential backoff (`k8s.io/client-go/util/retry`), initial delay 100ms, max 3 retries
 - [ ] Error handling: log API errors, increment `ztre_api_errors_total` metric
 - [ ] **Safety check:** Verify no `SIGKILL` or process termination anywhere in the codebase
 - [ ] Record containment in audit log with: timestamp, pod_name, namespace, risk_score
@@ -466,7 +471,7 @@ Foundation  ──►  Event        ──►  Validation  ──►  Decision &
 | **Deliverable** | Complete pipeline: EventCollector → Validator → RiskEngine → DecisionEngine → Containment/Alert |
 
 **Tasks:**
-- [ ] Wire modules in `main.py`:
+- [ ] Wire modules in `cmd/ztre-agent/main.go`:
   ```
   EventCollector → EventParser → LineageValidator
                                         │
@@ -482,8 +487,8 @@ Foundation  ──►  Event        ──►  Validation  ──►  Decision &
                                     ├── LOG_AND_ALERT → AlertDispatcher
                                     └── AUTO_CONTAINMENT → ContainmentExecutor
   ```
-- [ ] Graceful shutdown handling (SIGINT, SIGTERM → clean disconnect)
-- [ ] Health check endpoint at `/healthz`
+- [ ] Graceful shutdown handling (`os.Interrupt`, `syscall.SIGTERM` context cancellation)
+- [ ] Health check endpoint at `/healthz` (HTTP 200)
 - [ ] Integration test with mock Tetragon stream → verify full flow
 
 ---
@@ -731,19 +736,19 @@ Foundation  ──►  Event        ──►  Validation  ──►  Decision &
 
 | Component | Technology | Purpose |
 |---|---|---|
-| **Runtime** | Python 3.12 | ZTRE agent core |
-| **Container** | Docker (slim base) | Agent packaging |
-| **Orchestration** | Kubernetes (DaemonSet) | Agent deployment |
+| **Runtime** | Go (Golang) 1.22+ | ZTRE agent core |
+| **Container** | Distroless / Alpine (multi-stage) | Agent packaging (~20MB) |
+| **Orchestration** | Kubernetes (DaemonSet) | In-cluster agent deployment |
 | **eBPF Observability** | Tetragon | Kernel-level event generation |
 | **eBPF Networking** | Cilium | Network policy enforcement |
-| **Event Transport** | gRPC | Tetragon → Agent event stream |
-| **Configuration** | YAML | Policy files, whitelist, thresholds |
-| **K8s Client** | `kubernetes` Python SDK | Pod label patching |
-| **Metrics** | Prometheus + `prometheus-client` | Agent observability |
-| **Logging** | `structlog` (JSON) | Structured audit logs |
+| **Event Transport** | gRPC (`github.com/cilium/tetragon/api/v1/tetragon`) | Tetragon → Agent event stream over unix socket |
+| **Configuration** | YAML (`gopkg.in/yaml.v3`) | Policy files, whitelist, thresholds |
+| **K8s Client** | `k8s.io/client-go` | In-cluster Pod label patching |
+| **Metrics** | Prometheus (`client_golang`) | Agent observability |
+| **Logging** | `go.uber.org/zap` (JSON) | High-performance structured audit logs |
 | **Dashboards** | Grafana | Metrics visualization |
-| **Testing** | `pytest` | Unit and integration tests |
-| **Linting** | `ruff`, `mypy` | Code quality |
+| **Testing** | `go test` (standard library) | Unit and integration tests |
+| **Linting** | `golangci-lint` | Code quality |
 | **Image Scanning** | Trivy / Grype | Container security |
 | **Packaging** | Helm | Deployment automation |
 

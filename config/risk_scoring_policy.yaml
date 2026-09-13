@@ -1,0 +1,40 @@
+weights:
+  severity: 0.50
+  context: 0.30
+  asset_criticality: 0.20
+
+severity_scores:
+  reverse_shell: 50
+  chmod_suid: 45
+  curl_download: 40
+  bash_spawn: 35
+  file_write_etc: 30
+  default: 10
+
+context_scores:
+  NORMAL: 0
+  SUSPICIOUS: 15
+  ANOMALOUS: 30
+
+asset_criticality:
+  critical:
+    namespaces:
+      - database
+      - secrets
+      - auth
+    score: 20
+  high:
+    namespaces:
+      - api
+      - messaging
+    score: 15
+  medium:
+    namespaces:
+      - backend
+    score: 10
+  low:
+    namespaces:
+      - frontend
+      - static
+    score: 5
+  default_score: 10
