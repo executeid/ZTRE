@@ -3,9 +3,13 @@ kind: CiliumClusterwideNetworkPolicy
 metadata:
   name: ztre-quarantine-policy
 spec:
-  description: "ZTRE Automated Zero-Trust Quarantine: Blocks all ingress and egress traffic for pods labeled with ztre/quarantine=true"
+  description: "ZTRE Automated Zero-Trust Quarantine: Explicitly denies all ingress and egress traffic for pods labeled with ztre/quarantine=true"
   endpointSelector:
     matchLabels:
       ztre/quarantine: "true"
-  ingress: []
-  egress: []
+  ingressDeny:
+  - fromEntities:
+    - all
+  egressDeny:
+  - toEntities:
+    - all

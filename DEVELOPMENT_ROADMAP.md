@@ -75,18 +75,22 @@ Foundation  ──►  Event        ──►  Validation  ──►  Decision &
 **Tasks:**
 - [ ] Install Cilium via Helm with `--set kubeProxyReplacement=strict`
 - [ ] Verify `cilium status` reports all nodes healthy
-- [ ] Deploy `ztre-quarantine-policy` CiliumNetworkPolicy to all target namespaces:
+- [ ] Deploy `ztre-quarantine-policy` CiliumClusterwideNetworkPolicy:
   ```yaml
   apiVersion: "cilium.io/v2"
-  kind: CiliumNetworkPolicy
+  kind: CiliumClusterwideNetworkPolicy
   metadata:
     name: ztre-quarantine-policy
   spec:
     endpointSelector:
       matchLabels:
         ztre/quarantine: "true"
-    ingress: []
-    egress: []
+    ingressDeny:
+    - fromEntities:
+      - all
+    egressDeny:
+    - toEntities:
+      - all
   ```
 - [ ] Manual test: label a test pod with `ztre/quarantine=true`, confirm all traffic is blocked
 - [ ] Manual test: remove the label, confirm traffic resumes
