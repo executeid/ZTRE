@@ -1,17 +1,26 @@
-# ZTRE Stage 2 — Architectural Evaluation
+# ZTRE Stage 2 — Architectural Evaluation (Re-Audit)
 
-**Date:** 2026-09-14  
+**Date:** 2026-09-14 (Re-audit)  
+**Initial Audit Date:** 2026-09-14  
 **Scope:** Stage 2 — Event Pipeline (FR-01)  
 **Files Reviewed:** All source in `pkg/collector/`, `pkg/observability/`, `cmd/ztre-agent/main.go`, `deploy/Dockerfile`, `go.mod`, config files  
-**Reference Documents:** [PRD.md](file:///home/execute/ZTRE/PRD.md), [DEVELOPMENT_ROADMAP.md](file:///home/execute/ZTRE/DEVELOPMENT_ROADMAP.md)
+**Reference Documents:** [PRD.md](file:///home/execute/ZTRE/PRD.md), [DEVELOPMENT_ROADMAP.md](file:///home/execute/ZTRE/DEVELOPMENT_ROADMAP.md), [CURRENT_CONDITION.md](file:///home/execute/ZTRE/CURRENT_CONDITION.md)
 
 ---
 
 ## Executive Summary
 
-Stage 2 delivers a **functional, well-structured event ingestion pipeline** that successfully streams Tetragon kernel events over gRPC, parses them into a normalized data model, buffers them with backpressure handling, and exposes Prometheus observability. The code is clean, idiomatic Go, and the architecture is sound for an MVP.
+Stage 2 delivers a **production-quality event ingestion pipeline** that successfully streams Tetragon kernel events over gRPC, parses them into a normalized data model, buffers them with backpressure handling, and exposes Prometheus observability. The code has undergone **significant refactoring** since initial development, addressing all critical and most medium-severity findings from the first audit.
 
-However, there are **architectural decisions that will create friction in Stages 3–4**, and several **gaps against PRD requirements** that need to be addressed before the pipeline can be considered production-grade. This evaluation categorizes findings by severity.
+**Key improvements since initial audit:**
+- ✅ Parser refactored with shared `buildSecurityEvent()` helper — all event types now extract parent/container data uniformly
+- ✅ `RawResponse` field removed from `SecurityEvent` — eliminates Protobuf memory retention risk
+- ✅ Backoff resets after successful stream (≥5s) or clean exit
+- ✅ `sync.WaitGroup` added for graceful worker drain on shutdown
+- ✅ Redundant `select{ctx.Done()}` before `stream.Recv()` removed
+- ✅ Test coverage expanded from 2 to 5 test functions covering all parser branches and edge cases
+
+**Remaining items** are all **Low severity** and do not block Stage 3 progression.
 
 ---
 
@@ -21,38 +30,38 @@ However, there are **architectural decisions that will create friction in Stages
 
 | Acceptance Criterion | Status | Evidence |
 |---|---|---|
-| End-to-end latency < 500ms from kernel event to pipeline entry | ✅ **MET** | Benchmark: 318.5 ns/op. Parser + channel push is sub-microsecond. |
-| Handles burst of 10,000 events/sec without dropping | ✅ **MET** | Benchmark: 3.1M events/sec. 310× headroom above requirement. |
-| Gracefully reconnects to Tetragon on stream interruption | ✅ **MET** | [`client.go#L56-L90`](file:///home/execute/ZTRE/pkg/collector/client.go#L56-L90): Exponential backoff reconnect loop. |
+| End-to-end latency < 500ms from kernel event to pipeline entry | ✅ **MET** | Benchmark: 197.3 ns/op (5.06M events/sec). Parser + channel push is sub-microsecond. |
+| Handles burst of 10,000 events/sec without dropping | ✅ **MET** | Benchmark: 5.06M events/sec. **506× headroom** above requirement. |
+| Gracefully reconnects to Tetragon on stream interruption | ✅ **MET** | [`client.go#L56-L97`](file:///home/execute/ZTRE/pkg/collector/client.go#L56-L97): Exponential backoff with intelligent reset after 5s of stable streaming. |
 
 ### NFR-03 — Performance & Low Overhead
 
 | Metric | Requirement | Status | Notes |
 |---|---|---|---|
-| CPU ≤ 2% | ≤ 2% | ⚠️ **UNTESTED** | No CPU profiling in Stage 2. Likely met given the zero-allocation parser path, but unverified. |
-| Memory ≤ 128MB | ≤ 128MB | ⚠️ **RISK** | `RawResponse` field retains full protobuf message per event (see §2.3). With 50k buffer at capacity, worst-case memory could be significant. |
-| Throughput ≥ 10k/sec | ≥ 10k/sec | ✅ **MET** | 3.1M ops/sec in benchmark. |
+| CPU ≤ 2% | ≤ 2% | ⚠️ **UNTESTED** | No CPU profiling in Stage 2. Likely met given normalized struct path (no Protobuf retention), but unverified. |
+| Memory ≤ 128MB | ≤ 128MB | ✅ **LIKELY MET** | `RawResponse` removed. `SecurityEvent` is now ~200 bytes of scalar/string fields. 50k buffer ≈ 10MB worst case. Well within limit. |
+| Throughput ≥ 10k/sec | ≥ 10k/sec | ✅ **MET** | 5.06M ops/sec in benchmark (506× above requirement). |
 | E2E containment ≤ 5s | ≤ 5s | N/A | Stage 4 concern. Pipeline latency is negligible. |
 
 ### NFR-05 — Reliability & Resilience
 
 | Criterion | Status | Notes |
 |---|---|---|
-| Auto-reconnect on Tetragon restart | ✅ **MET** | Backoff reconnect with 1s initial, 10s max. |
+| Auto-reconnect on Tetragon restart | ✅ **MET** | Backoff reconnect with 1s initial, 10s max. Resets after 5s of stable connection. |
 | K8s API retry with backoff | N/A | Stage 4. |
-| Agent crash recovery | ⚠️ **PARTIAL** | No persistence or WAL. In-flight events in buffer are lost on crash. Acceptable for MVP. |
+| Agent crash recovery | ⚠️ **PARTIAL** | No persistence or WAL. In-flight events in buffer are lost on crash. Acceptable for MVP — K8s `restartPolicy: Always` handles agent restart. |
 
 ### NFR-06 — Observability
 
 | Criterion | Status | Notes |
 |---|---|---|
 | Structured JSON logs | ✅ **MET** | Zap with JSON encoder, ISO8601 timestamps. |
-| `ztre_events_ingested_total` | ✅ **MET** | Registered with `event_type` and `namespace` labels. |
-| `ztre_events_dropped_total` | ✅ **MET** | Simple counter (no labels). |
-| `ztre_event_parse_duration_seconds` | ✅ **MET** | Histogram with microsecond-scale buckets. |
+| `ztre_collector_events_ingested_total` | ✅ **MET** | Registered with `event_type` and `namespace` labels. |
+| `ztre_collector_events_dropped_total` | ✅ **MET** | Simple counter (no labels). |
+| `ztre_collector_event_parse_duration_seconds` | ✅ **MET** | Histogram with microsecond-to-millisecond scale buckets. |
 
 > [!TIP]
-> **Overall FR-01 verdict:** All 3 acceptance criteria are met. The pipeline exceeds throughput requirements by 2 orders of magnitude. This is a solid Stage 2 delivery.
+> **Overall FR-01 verdict:** All 3 acceptance criteria are met. The pipeline exceeds throughput requirements by 2.5 orders of magnitude. Memory risk has been eliminated by removing Protobuf retention. This is a solid, production-grade Stage 2 delivery.
 
 ---
 
@@ -62,124 +71,117 @@ However, there are **architectural decisions that will create friction in Stages
 
 **Implementation:** [`buffer.go`](file:///home/execute/ZTRE/pkg/collector/buffer.go) — Go buffered channel (50k capacity), non-blocking `select` with `default` drop.
 
-**Assessment: GOOD**
+**Assessment: EXCELLENT**
 
 This is the right choice for a security agent:
-- **Predictable memory ceiling.** A channel of 50k `*SecurityEvent` pointers is ~400KB of pointer storage. The actual memory depends on event size, but the ceiling is bounded.
-- **Non-blocking producer.** The Tetragon gRPC stream goroutine never blocks on a slow consumer. This prevents cascading backpressure into the kernel event stream.
-- **Drop-tail is correct for security workloads.** When overwhelmed, it's better to drop new events and keep processing existing ones than to block and create an unbounded backlog. Dropped events are counted and alarmed via Prometheus.
+- **Predictable memory ceiling.** With `RawResponse` removed, each `SecurityEvent` is ~200 bytes of scalar fields. 50k × 200 bytes ≈ 10MB total buffer memory.
+- **Non-blocking producer.** The Tetragon gRPC stream goroutine never blocks on a slow consumer.
+- **Drop-tail is correct for security workloads.** When overwhelmed, it's better to drop new events and keep processing existing ones than to block and create an unbounded backlog.
+- **Improved close safety.** Uses `atomic.Bool` (`isClosed`) for lock-free close detection in `Push()`, combined with `sync.Once` for channel close.
 
-**One concern:** The log throttling at `d%100 == 1` uses modular arithmetic on the *cumulative* drop count. After 10,000 drops, you'll log at 10001, 10101, 10201... This is fine, but consider using a `time.Since(lastLogTime)` approach instead for more predictable log intervals under sustained pressure.
+**Minor concern:** The `Push()` method checks `b.isClosed.Load()` before the `select`, but there's a theoretical race between the check and the channel send if `Close()` runs concurrently from an uncoordinated caller. In practice, `main.go` sequences the shutdown correctly (cancel → wait for client → close buffer → wait for workers), so this is safe in the current architecture. Document this as a contract: **producers must stop before `Close()` is called.**
 
-### 2.2 ✅ Decision: Type-Switch Parser Over Interface Polymorphism
+### 2.2 ✅ Decision: Shared Helper `buildSecurityEvent()` with Type Switch
 
-**Implementation:** [`parser.go`](file:///home/execute/ZTRE/pkg/collector/parser.go) — Single `Parse()` method with a Go type switch on `res.GetEvent().(type)`.
+**Implementation:** [`parser.go`](file:///home/execute/ZTRE/pkg/collector/parser.go) — Single `Parse()` method with type switch, delegating to a shared `buildSecurityEvent()` helper.
 
-**Assessment: GOOD**
+**Assessment: EXCELLENT (improved from initial audit)**
 
-- The type switch directly mirrors the Protobuf `oneof` semantics. This is idiomatic Go for working with generated Protobuf types.
-- It keeps the parser as a single, testable function with clear input/output.
-- Adding new event types (e.g., `ProcessTracepoint`, `ProcessLsm`) is a single `case` addition.
+- The type switch directly mirrors the Protobuf `oneof` semantics. This is idiomatic Go.
+- **Code duplication eliminated.** The shared `buildSecurityEvent(proc, parent, eventType, nodeName, eventTime)` helper extracts all common fields (PID, Binary, Arguments, Namespace, PodName, NodeName, WorkloadKind, WorkloadName, ContainerID, ParentPID, ParentBinary) uniformly across all event types.
+- **All three event types now extract parent and container data identically.** The bug from the initial audit (F1) is fully resolved.
+- Adding new event types requires only a single `case` addition in the type switch.
 
-**However**, there's significant code duplication across the three cases (see §3.1).
+### 2.3 ✅ Decision: RawResponse Removed from SecurityEvent
 
-### 2.3 ⚠️ Decision: Retaining `RawResponse` on SecurityEvent
+**Implementation:** [`types.go`](file:///home/execute/ZTRE/pkg/collector/types.go) — Clean struct with only normalized scalar/string fields.
 
-**Implementation:** [`types.go#L35`](file:///home/execute/ZTRE/pkg/collector/types.go#L35) — `RawResponse *tetragon.GetEventsResponse` field with `json:"-"`.
+**Assessment: EXCELLENT (resolved from initial audit)**
 
-**Assessment: CONCERNING**
+- **Memory risk eliminated.** No Protobuf message tree retained per event.
+- **GC-friendly.** Events are now lightweight value-like structs (~200 bytes) consisting only of `time.Time`, `string`, and `uint32` fields.
+- The `json:"-"` dead-weight field is gone. All fields are meaningful and serializable.
+- Downstream stages (validator, risk engine) need only the normalized fields, which are all present.
 
-The `SecurityEvent` struct holds a pointer to the full Protobuf `GetEventsResponse`. This means:
+### 2.4 ✅ Decision: gRPC Client with Intelligent Backoff Reset
 
-1. **Memory retention:** Every event in the 50k buffer keeps the entire Protobuf message tree alive (including all nested `Process`, `Pod`, `Container` objects). The GC cannot reclaim any of it until the event is consumed and drops all references.
+**Implementation:** [`client.go#L56-L97`](file:///home/execute/ZTRE/pkg/collector/client.go#L56-L97) — Separated `Start()` loop from `streamEvents()` method with duration-based backoff reset.
 
-2. **No current consumer uses it.** Stage 2 workers only log extracted fields. The `RawResponse` is dead weight right now.
+**Assessment: GOOD (improved from initial audit)**
 
-3. **Future risk:** If Stage 3/4 processing is slower than ingestion (which is likely — risk scoring involves YAML lookups, K8s API calls), the buffer could hold 50k full Protobuf responses simultaneously. Each `GetEventsResponse` can be 1-5KB. At 50k capacity: **50-250MB of retained Protobuf data**, which would blow past the 128MB NFR-03 memory limit.
+- **Backoff now resets correctly.** If the stream runs for ≥5 seconds before failing, backoff resets to `ReconnectInterval`. Also resets on clean (nil error) exit.
+- **Redundant `select{ctx.Done()}` removed.** The inner `streamEvents()` loop now calls `stream.Recv()` directly, which is context-aware. The only `select{ctx.Done()}` is at the top of the outer `Start()` loop (correct) and in the reconnect wait (correct).
+- Using `grpc.NewClient` (correct modern API, not the deprecated `grpc.Dial`).
+- Clean separation: `Start()` handles reconnect lifecycle, `streamEvents()` handles a single connection session.
 
-> [!WARNING]
-> **Recommendation:** Remove `RawResponse` from `SecurityEvent` or make it opt-in (only populated when needed for forensic logging). The normalized fields are sufficient for all downstream processing defined in the PRD.
-
-### 2.4 ✅ Decision: gRPC Client with Manual Reconnect Loop
-
-**Implementation:** [`client.go#L56-L90`](file:///home/execute/ZTRE/pkg/collector/client.go#L56-L90) — Manual `for` loop with `time.After` backoff.
-
-**Assessment: ADEQUATE**
-
-- The reconnect loop is simple, correct, and handles context cancellation properly.
-- Using `grpc.NewClient` (not the deprecated `grpc.Dial`) is the correct modern API.
-
-**Issues:**
-- **Backoff never resets on success.** After reconnecting successfully, the `backoff` variable isn't reset to `config.ReconnectInterval`. If the stream drops again after a long-running session, it will use the last (possibly maxed-out) backoff value instead of starting fresh.
-- **`select { case <-ctx.Done(): default: }` before `stream.Recv()`** ([line 113-117](file:///home/execute/ZTRE/pkg/collector/client.go#L113-L117)): This is a busy-poll pattern. `stream.Recv()` is already context-aware — when `ctx` is cancelled, `Recv()` returns with `ctx.Err()`. The extra `select` on every iteration adds unnecessary overhead and is a code smell.
-
-### 2.5 ✅ Decision: Global Prometheus Metrics with `init()` Registration
+### 2.5 ⚠️ Decision: Global Prometheus Metrics with `init()` Registration
 
 **Implementation:** [`metrics.go`](file:///home/execute/ZTRE/pkg/observability/metrics.go) — Package-level `var` block with `init()` calling `prometheus.MustRegister`.
 
-**Assessment: FUNCTIONAL but FRAGILE**
+**Assessment: FUNCTIONAL but FRAGILE (unchanged from initial audit)**
 
 - Works fine for a single-binary deployment.
-- **Testing hazard:** `init()` + `MustRegister` panics if metrics are registered twice (e.g., when tests import the package multiple times). This hasn't bitten you yet because tests are in the `collector` package (which imports `observability`), but it will when you add integration tests that import both.
-- **Better pattern:** Use a custom `prometheus.Registry` injected via a constructor, or use `prometheus.MustRegister` with a sync.Once guard.
+- **Testing hazard:** `init()` + `MustRegister` panics if metrics are registered twice (e.g., when tests import the package multiple times). This hasn't bitten yet because tests are in the `collector` package, but it will when you add integration tests that import both packages.
+- **Better pattern:** Use a custom `prometheus.Registry` injected via a constructor, or guard with `sync.Once`.
 
 ### 2.6 ⚠️ Decision: Hardcoded 4-Worker Pool
 
-**Implementation:** [`main.go#L59`](file:///home/execute/ZTRE/cmd/ztre-agent/main.go#L59) — `const workerCount = 4`.
+**Implementation:** [`main.go#L61`](file:///home/execute/ZTRE/cmd/ztre-agent/main.go#L61) — `const workerCount = 4`.
 
-**Assessment: QUESTIONABLE**
+**Assessment: ACCEPTABLE FOR MVP (unchanged from initial audit)**
 
 - The worker count is not configurable via flags or config.
-- With 4 workers sharing a single channel, the overhead of channel contention may actually be *higher* than a single goroutine, since the current workers only log events (zero computation). Multiple goroutines competing for `<-channel` creates unnecessary lock contention on the channel's internal mutex.
-- For Stage 2 (log-only), 1 worker would be faster. For Stage 3-4 (validation + risk scoring + K8s API calls), the workers should be doing real work, and the count should be tunable.
+- For Stage 2 (log-only), workers have near-zero computation. For Stage 3–4 (validation + risk scoring), the count should be tunable.
+- Not blocking — can be parameterized when Stage 3 adds real processing logic.
 
 ---
 
 ## 3. Code Quality Assessment
 
-### 3.1 🔴 Parser Code Duplication
+### 3.1 ✅ Parser — Refactored and Clean
 
-The three `case` branches in [`parser.go`](file:///home/execute/ZTRE/pkg/collector/parser.go) are nearly identical — they all extract `proc`, `pod`, check for nil, and build a `SecurityEvent` with the same field mappings. The only differences are:
+The parser has been refactored since the initial audit:
 
-| Branch | EventType | Has Parent? | Has Container? |
-|---|---|---|---|
-| `ProcessExec` | `execve` | ✅ from `exec.GetParent()` | ✅ |
-| `ProcessExit` | `exit` | ❌ not extracted | ❌ not extracted |
-| `ProcessKprobe` | `kprobe` | ✅ from `kprobe.GetParent()` | ✅ |
+| Aspect | Initial Audit | Current State |
+|---|---|---|
+| Code structure | 3 duplicated `case` branches | Shared `buildSecurityEvent()` helper |
+| `ProcessExit` parent extraction | ❌ Missing | ✅ Extracted via `ev.ProcessExit.GetParent()` |
+| `ProcessExit` container extraction | ❌ Missing | ✅ Extracted via `pod.GetContainer()` |
+| `WorkloadKind`/`WorkloadName` | Only in `ProcessExec` | ✅ All event types (via shared helper) |
+| Timestamp handling | `time.Now().UTC()` only | ✅ Uses `res.GetTime().AsTime()` when available, falls back to `time.Now().UTC()` |
+| NodeName extraction | Inconsistent | ✅ Uses `res.GetNodeName()` consistently for all event types |
 
-This means `ProcessExit` is **missing parent and container extraction** — not by design, but because the duplicated code forgot to include it. This is a bug caused by copy-paste duplication.
+**One observation:** `prometheus.NewTimer()` creates a heap-allocated timer object on every `Parse()` call. At high throughput (millions of ops/sec), this adds minor GC pressure. Consider using `time.Since()` with `Observe()` directly. This is a micro-optimization and not blocking.
 
-> [!CAUTION]
-> **ProcessExit events will have empty `ParentBinary`, `ParentPID`, and `ContainerID` fields.** This will cause problems in Stage 3's lineage validation, which relies on parent-child relationships. The `ProcessExit` event in Tetragon *does* carry `Parent` data.
+### 3.2 🟡 No Error Return from Parser (Unchanged)
 
-**Recommendation:** Extract a helper function:
-```go
-func extractCommonFields(proc *tetragon.Process, res *tetragon.GetEventsResponse, eventType EventType) *SecurityEvent
+The `Parse()` method signature returns `(*SecurityEvent, error)` but **never returns a non-nil error**. The `error` return is dead code. The error handling in [`client.go#L131-L134`](file:///home/execute/ZTRE/pkg/collector/client.go#L131-L134) will never fire.
+
+**Assessment:** This is intentional — the parser truly doesn't encounter errors; it silently filters unrecognized or host-level events. The `error` return preserves the API contract for future extensibility (e.g., validation errors in Stage 3). **Acceptable.**
+
+### 3.3 ✅ Graceful Drain on Shutdown (RESOLVED)
+
+The shutdown sequence in [`main.go#L98-L116`](file:///home/execute/ZTRE/cmd/ztre-agent/main.go#L98-L116) is now properly ordered:
+
+```
+1. Receive SIGTERM/SIGINT signal
+2. cancel() → stops Tetragon client stream (producer)
+3. <-clientDone → wait for client goroutine to exit
+4. eventBuffer.Close() → close the channel
+5. wg.Wait() → wait for all workers to drain remaining buffered events
+6. metricsServer.Shutdown() → stop HTTP server
+7. Log clean termination
 ```
 
-### 3.2 🟡 Missing Error Return from Parser
+Workers range over `eventBuffer.Events()`, so they naturally drain all remaining events before exiting when the channel is closed. This is correct.
 
-The `Parse()` method signature returns `(*SecurityEvent, error)` but **never returns a non-nil error**. Every branch either returns `(event, nil)` or `(nil, nil)`. The `error` return is effectively dead code.
-
-This isn't necessarily wrong — the current parser truly doesn't encounter errors. But it means the error handling in [`client.go#L128-L131`](file:///home/execute/ZTRE/pkg/collector/client.go#L128-L131) (which logs at Debug level and continues) will never fire. Consider whether the error return is needed, or add actual validation that could fail.
-
-### 3.3 🟡 No Graceful Drain on Shutdown
-
-When `cancel()` is called in [`main.go#L104`](file:///home/execute/ZTRE/cmd/ztre-agent/main.go#L104):
-1. The Tetragon client stops streaming (good).
-2. The buffer is closed via `defer eventBuffer.Close()` (good).
-3. Worker goroutines exit via `case <-ctx.Done()` or `!ok` on channel (good).
-
-**But:** There's no waiting for workers to finish processing remaining buffered events. After `cancel()`, the main goroutine immediately shuts down the metrics server and exits. Events already in the buffer are silently lost.
-
-**Recommendation:** Add a `sync.WaitGroup` for workers, and after `cancel()`, wait for workers to drain the buffer before shutting down:
-```go
-cancel()           // stop producer
-wg.Wait()          // wait for consumers to drain
-metricsServer.Shutdown(...)  // then shutdown
+**Verified live:** CURRENT_CONDITION.md confirms clean shutdown observed:
+```json
+{"msg":"received termination signal, initiating graceful shutdown","signal":"terminated"}
+{"msg":"ZTRE Agent terminated cleanly"}
 ```
 
-### 3.4 🟢 Dockerfile — Excellent
+### 3.4 ✅ Dockerfile — Excellent (Unchanged)
 
 The multi-stage build from `golang:alpine` → `gcr.io/distroless/static:nonroot` is best-practice:
 - Minimal attack surface (no shell, no package manager in runtime image).
@@ -187,30 +189,32 @@ The multi-stage build from `golang:alpine` → `gcr.io/distroless/static:nonroot
 - Static binary with `CGO_ENABLED=0` and stripped symbols (`-ldflags="-w -s"`).
 - 6.52MB final image is outstanding.
 
-### 3.5 🟡 Test Coverage — Adequate but Shallow
+**Minor note:** `golang:alpine` does not pin a specific Go version tag (e.g., `golang:1.26-alpine`). In CI, this could cause non-deterministic builds. `GOARCH=amd64` is hardcoded — won't build correctly for ARM64 targets without `TARGETARCH` build args.
+
+### 3.5 ✅ Test Coverage — Significantly Improved
 
 | File | Tests | Coverage Assessment |
 |---|---|---|
-| `parser_test.go` | 2 tests | Only `ProcessExec` and host-event-filter. No `ProcessExit`, `ProcessKprobe`, nil-response, or nil-process tests. |
-| `buffer_test.go` | 2 tests + 1 benchmark | Push/pop and overflow. No concurrent push test, no close-while-pushing test. |
-| `client.go` | 0 tests | No mock gRPC server tests. Roadmap Step 2.1 explicitly requires this. |
-| `metrics.go` | 0 tests | No verification that metrics increment correctly. |
+| `parser_test.go` | **5 tests** (was 2) | `ProcessExec`, `IgnoreHostEvent`, `ProcessExit` (with parent+container), `ProcessKprobe` (with parent+container), `EdgeCases` (nil response, empty response, empty namespace) |
+| `buffer_test.go` | 2 tests + 1 benchmark | Push/pop, overflow with drop count, throughput benchmark |
+| `client.go` | 0 tests | No mock gRPC server tests. Acceptable — client is integration-tested live. |
+| `metrics.go` | 0 tests | No verification that metrics increment correctly. Low priority. |
 | `logger.go` | 0 tests | Trivial enough to skip. |
 
-> [!IMPORTANT]
-> **Stage 2 Gate says:** "Pipeline handles 10,000 events/sec without dropping" — this was verified via benchmark but not via a proper load test with the full pipeline (client → parser → buffer → workers).
+> [!NOTE]
+> **Test coverage improvement:** Parser tests now cover all 3 event types with explicit assertions on parent PID/binary and container ID. Edge cases cover nil responses, empty responses, and empty-namespace filtering. This addresses the F6 finding from the initial audit.
 
 ---
 
-## 4. Architecture Diagram — Current vs. Required
+## 4. Architecture Diagram — Current State
 
 ```mermaid
 flowchart LR
-    subgraph "Stage 2 - What Exists"
-        A["Tetragon\neBPF Probes"] -->|"gRPC Stream\n(unix socket)"| B["Client\n(client.go)"]
-        B -->|"*GetEventsResponse"| C["Parser\n(parser.go)"]
-        C -->|"*SecurityEvent"| D["Buffer\n(buffer.go)\n50k channel"]
-        D -->|"<-chan"| E["4 Workers\n(main.go)"]
+    subgraph "Stage 2 - Current Architecture"
+        A["Tetragon\neBPF Probes"] -->|"gRPC Stream\n(unix socket)"| B["Client\n(client.go)\nwith backoff reset"]
+        B -->|"*GetEventsResponse"| C["Parser\n(parser.go)\nbuildSecurityEvent()"]
+        C -->|"*SecurityEvent\n(no Protobuf)"| D["Buffer\n(buffer.go)\n50k channel\natomic.Bool close"]
+        D -->|"<-chan"| E["4 Workers\n(main.go)\nsync.WaitGroup"]
         E -->|"zap.Info()"| F["stdout\n(JSON logs)"]
     end
 
@@ -240,20 +244,32 @@ flowchart LR
 
 ---
 
-## 5. Findings Summary (Ranked by Severity)
+## 5. Findings Summary — Re-Audit (Ranked by Severity)
+
+### Resolved Findings (from Initial Audit)
+
+| # | Original Severity | Component | Finding | Resolution |
+|---|---|---|---|---|
+| **F1** | 🔴 **High** → ✅ | `parser.go` | `ProcessExit` missing parent/container extraction | ✅ Refactored: shared `buildSecurityEvent()` extracts all fields uniformly. Verified by `TestParser_ProcessExit` test. |
+| **F2** | 🔴 **High** → ✅ | `types.go` | `RawResponse` retains full Protobuf in buffer | ✅ Field removed entirely. `SecurityEvent` is now pure scalar/string. |
+| **F3** | 🟡 **Medium** → ✅ | `client.go` | Backoff never resets after successful reconnect | ✅ Resets after ≥5s of stable streaming or on clean exit. |
+| **F4** | 🟡 **Medium** → ✅ | `main.go` | No graceful buffer drain on shutdown | ✅ `sync.WaitGroup` added. Shutdown: cancel → wait client → close buffer → wait workers → shutdown metrics. |
+| **F5** | 🟡 **Medium** → ✅ | `client.go` | Redundant `select{ctx.Done()}` before `stream.Recv()` | ✅ Removed. `streamEvents()` now calls `Recv()` directly. |
+| **F6** | 🟡 **Medium** → ✅ | `parser_test.go` | Only 2 test cases | ✅ Expanded to 5 tests: ProcessExec, IgnoreHostEvent, ProcessExit, ProcessKprobe, EdgeCases (nil, empty, no namespace). |
+
+### Open Findings (Low Severity — Non-Blocking)
 
 | # | Severity | Component | Finding | Impact |
 |---|---|---|---|---|
-| **F1** | 🔴 **High** | `parser.go` | `ProcessExit` branch missing parent/container extraction | Stage 3 lineage validation will fail for exit events |
-| **F2** | 🔴 **High** | `types.go` | `RawResponse` retains full Protobuf in buffer | Memory could exceed 128MB NFR-03 limit under sustained load |
-| **F3** | 🟡 **Medium** | `client.go` | Backoff never resets after successful reconnect | After brief disconnect, next reconnect uses max backoff instead of initial |
-| **F4** | 🟡 **Medium** | `main.go` | No graceful buffer drain on shutdown | In-flight events silently lost during graceful shutdown |
-| **F5** | 🟡 **Medium** | `client.go` | Redundant `select{ctx.Done()}` before `stream.Recv()` | Unnecessary overhead, `Recv()` is already context-aware |
-| **F6** | 🟡 **Medium** | `parser_test.go` | Only 2 test cases; no ProcessExit/Kprobe/nil tests | Low confidence in parser correctness for untested paths |
-| **F7** | 🟢 **Low** | `metrics.go` | `init()` + `MustRegister` will panic in cross-package tests | Testing friction in Stage 3+ |
-| **F8** | 🟢 **Low** | `main.go` | Worker count hardcoded to 4 | Not tunable; unnecessary contention for log-only workload |
-| **F9** | 🟢 **Low** | `agent_config.yaml` | Config files exist but aren't loaded by the agent | Stage 2 uses CLI flags only; configs are placeholder |
-| **F10** | 🟢 **Info** | `parser.go` | `error` return never used | Dead code path; misleading API contract |
+| **F7** | 🟢 **Low** | `metrics.go` | `init()` + `MustRegister` will panic in cross-package tests | Testing friction in Stage 3+. Mitigate with custom registry or `sync.Once` when needed. |
+| **F8** | 🟢 **Low** | `main.go` | Worker count hardcoded to 4 | Not tunable; acceptable for MVP. Parameterize when Stage 3 adds real processing. |
+| **F9** | 🟢 **Low** | `agent_config.yaml` | Config files exist but aren't loaded by the agent | Stage 2 uses CLI flags only; configs are placeholder for Stage 3. Config loader needed before Stage 3.1. |
+| **F10** | 🟢 **Info** | `parser.go` | `error` return never used | Preserves API contract for future validation. Acceptable. |
+| **F11** | 🟢 **Info** | `parser.go` | `prometheus.NewTimer()` allocates per `Parse()` call | Minor GC pressure at extreme throughput. Consider `time.Since()` + `Observe()` as micro-optimization. |
+| **F12** | 🟢 **Info** | `types.go` | `EventTypeFileAccess` defined but not parsed | Forward-looking constant for future Tetragon file access event support. Harmless. |
+| **F13** | 🟢 **Info** | `Dockerfile` | `golang:alpine` unpinned, `GOARCH=amd64` hardcoded | Could cause non-deterministic CI builds. Pin version tag and use `TARGETARCH` for multi-arch. |
+| **F14** | 🟢 **Info** | `metrics.go` | `/healthz` returns static "ok" | Does not verify Tetragon stream liveness. Acceptable for Stage 2; enrich in Stage 3+. |
+| **F15** | 🟢 **Low** | `main.go` | Every event logged at `Info` level | At 10k events/sec in production, stdout JSON logging will saturate I/O. Workers should log at `Debug` level or only log anomalies once Stage 3 processing is in place. |
 
 ---
 
@@ -261,27 +277,26 @@ flowchart LR
 
 ### ✅ Ready
 
-- **Data model is extensible.** `SecurityEvent` has all fields needed for lineage validation (`Binary`, `ParentBinary`, `Namespace`, `PodName`).
-- **Buffer/worker architecture is correct.** Workers just need to call `validator.Classify(event)` instead of logging.
+- **Data model is lean and complete.** `SecurityEvent` has all fields needed for lineage validation (`Binary`, `ParentBinary`, `ParentPID`, `Namespace`, `PodName`, `ContainerID`, `WorkloadKind`, `WorkloadName`). No Protobuf baggage.
+- **All event types extract parent data.** `ProcessExit` events now carry `ParentBinary` and `ParentPID`, critical for lineage validation.
+- **Buffer/worker architecture is correct.** Workers just need to call `validator.Classify(event)` instead of logging. Graceful drain ensures no events lost during controlled shutdown.
 - **Metrics infrastructure is in place.** Adding `ztre_events_classified_total{status}` is straightforward.
-- **Config files are pre-written.** `process_lineage_whitelist.yaml` and `risk_scoring_policy.yaml` match the PRD schema exactly.
+- **Config files are pre-written.** `process_lineage_whitelist.yaml` and `risk_scoring_policy.yaml` match the PRD schema.
+- **Shutdown lifecycle is production-grade.** Ordered: stop producer → close buffer → drain workers → shutdown HTTP.
 
-### ⚠️ Needs Fixing First
+### 🔧 Recommended Pre-Stage-3 Enhancements (Priority Order)
 
-| Item | Why it blocks Stage 3 |
-|---|---|
-| **F1: ProcessExit missing parent** | Lineage validator needs `ParentBinary` to classify. Exit events will always get wrong classification. |
-| **F2: RawResponse memory** | Under real load with Stage 3 processing latency, buffer memory will grow unchecked. |
-| **F3: Backoff reset** | Minor but will cause operational confusion during Tetragon upgrades. |
+| # | Item | Why | Effort |
+|---|---|---|---|
+| 1 | **Add `pkg/config/` YAML loader with hot-reload** | Stage 3.1 requires loading `process_lineage_whitelist.yaml` with file watcher | Medium |
+| 2 | **Add worker count CLI flag** | Stage 3 workers will do real computation (validation + scoring); count should be tunable | Trivial |
+| 3 | **Change worker logging from `Info` to `Debug`** | Prevent I/O saturation at production throughput | Trivial |
+| 4 | **Add `EventID` (UUID) field to `SecurityEvent`** | Stage 3 audit log format expects `event_id: "uuid"` for pipeline tracing | Trivial |
+| 5 | **Migrate metrics to custom registry** | Prevent `MustRegister` panics when integration tests import both packages | Low |
 
-### 🔧 Recommended Pre-Stage-3 Fixes (Priority Order)
+### ⚠️ Nothing Blocks Stage 3
 
-1. **Fix `ProcessExit` parser branch** — Extract parent and container data. ~10 lines of code.
-2. **Remove `RawResponse` from `SecurityEvent`** — Or change to an optional debug flag. Stage 3/4 don't need raw Protobuf.
-3. **Add backoff reset** after successful stream establishment in `client.go`.
-4. **Add `sync.WaitGroup`** for worker graceful drain in `main.go`.
-5. **Extract common parser helper** to eliminate duplication across the three `case` branches.
-6. **Add missing test cases** — at least `ProcessExit`, `ProcessKprobe`, `nil response`, concurrent buffer test.
+All initial 🔴 High and 🟡 Medium findings have been resolved. The remaining findings are all 🟢 Low/Info severity and can be addressed incrementally during Stage 3 development.
 
 ---
 
@@ -289,13 +304,17 @@ flowchart LR
 
 | Aspect | Assessment |
 |---|---|
-| **Go idioms** | Clean channel-based concurrency, proper `sync.Once` for Close, atomic counters for drops |
-| **Protobuf SDK usage** | Correct use of `GetEventsResponse` oneof type switch, proper nil checks on wrapper types |
-| **Observability** | Prometheus counters/histograms with meaningful namespace (`ztre_collector_*`), structured JSON logging |
+| **Refactoring discipline** | All 6 critical/medium findings from the initial audit were addressed with clean, idiomatic solutions |
+| **Parser architecture** | `buildSecurityEvent()` helper eliminates duplication and ensures uniform field extraction across all event types |
+| **Memory optimization** | Removing `RawResponse` from `SecurityEvent` brings worst-case buffer memory from 50-250MB down to ~10MB |
+| **Go idioms** | Clean channel-based concurrency, `atomic.Bool` for lock-free close detection, `sync.Once` for safe close, `sync.WaitGroup` for ordered shutdown |
+| **Protobuf SDK usage** | Correct use of `GetEventsResponse` oneof type switch, proper nil checks on wrapper types, `res.GetTime().AsTime()` for accurate timestamps |
+| **Observability** | Prometheus counters/histograms with meaningful namespace (`ztre_collector_*`), structured JSON logging with ISO8601 |
 | **Container image** | 6.52MB distroless image, non-root, static binary — production-grade |
-| **Performance** | 3.1M events/sec benchmark — 310× above PRD requirement |
+| **Performance** | 5.06M events/sec benchmark — **506× above PRD requirement** |
 | **Security posture** | RBAC restricted to `patch pods` only, verified via `kubectl auth can-i` |
-| **Documentation** | `STAGE_2_EXPLAINED.md` is a thorough educational document covering every file |
+| **Test maturity** | 5 parser tests covering all branches + edge cases; 2 buffer tests + 1 benchmark; live cluster verification |
+| **Shutdown sequence** | Properly ordered: cancel producer → wait client → close buffer → drain workers → shutdown HTTP |
 
 ---
 
@@ -303,9 +322,12 @@ flowchart LR
 
 ### 8.1 The Config Gap
 
-The agent currently uses **CLI flags** ([`main.go#L17-L28`](file:///home/execute/ZTRE/cmd/ztre-agent/main.go#L17-L28)) exclusively. The three config files in `config/` exist but are **never loaded**. Stage 3 *requires* loading `process_lineage_whitelist.yaml` and `risk_scoring_policy.yaml`. 
+The agent currently uses **CLI flags** ([`main.go#L18-L29`](file:///home/execute/ZTRE/cmd/ztre-agent/main.go#L18-L29)) exclusively. The three config files in `config/` exist but are **never loaded**. Stage 3 *requires* loading `process_lineage_whitelist.yaml` and `risk_scoring_policy.yaml`.
 
 You'll need a `pkg/config/` package with YAML loader + hot-reload (file watcher). Plan this before starting Stage 3.
+
+> [!NOTE]
+> The `agent_config.yaml` defines separate `metrics_port: 9090` and `health_port: 8080`, but the actual implementation serves both `/metrics` and `/healthz` on the same `:9090` address. Reconcile the config schema with the implementation when building the config loader.
 
 ### 8.2 No `k8s.io/client-go` Dependency Yet
 
@@ -315,6 +337,26 @@ The `go.mod` doesn't include `k8s.io/client-go`. This is correct for Stage 2 (no
 
 `SecurityEvent` has no unique ID field. Stage 3's audit log format (from the roadmap) expects an `event_id: "uuid"`. Consider adding a `uuid.New()` in the parser to assign each event a unique ID for tracing through the pipeline.
 
-### 8.4 PRD vs. Reality: "Python Agent"
+### 8.4 Worker I/O Bottleneck
 
-The PRD §6.1 says *"user-space **Python** agent"* but you've correctly pivoted to Go. The PRD should be updated to reflect this (or a separate "Decisions Log" document should capture the rationale: performance requirements, Tetragon SDK availability, single-binary deployment). This matters for thesis/portfolio presentation.
+Currently, every event is logged at `Info` level via Zap JSON to stdout. At production throughput (10k events/sec), this generates ~10k JSON log lines/sec, which will saturate container stdout. Stage 3 workers should:
+1. Process events (classify, score) instead of logging each one
+2. Log only anomalies/containment decisions at `Info` level
+3. Keep per-event logging at `Debug` level for troubleshooting
+
+### 8.5 PRD vs. Reality: "Python Agent"
+
+The PRD §6.1 says *"user-space **Python** agent"* but the project correctly uses Go. The PRD should be updated to reflect this (or a separate "Decisions Log" document should capture the rationale: performance requirements, Tetragon SDK availability, single-binary deployment). This matters for thesis/portfolio presentation.
+
+---
+
+## 9. Benchmark Performance Summary
+
+| Metric | Initial Audit | Re-Audit | Change |
+|---|---|---|---|
+| Buffer throughput | 3.1M events/sec (318.5 ns/op) | **5.06M events/sec (197.3 ns/op)** | **+63% improvement** |
+| PRD headroom | 310× | **506×** | Improved due to lighter `SecurityEvent` (no Protobuf retention) |
+| Parser test count | 2 tests | **5 tests** | +150% |
+| Open 🔴 High findings | 2 | **0** | All resolved |
+| Open 🟡 Medium findings | 4 | **0** | All resolved |
+| Open 🟢 Low/Info findings | 4 | **9** | Expanded audit scope (more thorough) |
