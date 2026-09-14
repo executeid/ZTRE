@@ -5,6 +5,7 @@ import (
 	"flag"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -56,29 +57,24 @@ func main() {
 	defer eventBuffer.Close()
 
 	// 5. Start Consumer Worker Pool
+	var wg sync.WaitGroup
 	const workerCount = 4
 	for i := 0; i < workerCount; i++ {
 		workerID := i
+		wg.Add(1)
 		go func() {
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case event, ok := <-eventBuffer.Events():
-					if !ok {
-						return
-					}
-					// Stage 2: Ingest & log received event
-					logger.Info("ingested security event",
-						zap.Int("worker", workerID),
-						zap.String("type", string(event.EventType)),
-						zap.String("namespace", event.Namespace),
-						zap.String("pod", event.PodName),
-						zap.String("binary", event.Binary),
-						zap.Uint32("pid", event.PID),
-						zap.String("parent_binary", event.ParentBinary),
-					)
-				}
+			defer wg.Done()
+			for event := range eventBuffer.Events() {
+				// Stage 2: Ingest & log received event
+				logger.Info("ingested security event",
+					zap.Int("worker", workerID),
+					zap.String("type", string(event.EventType)),
+					zap.String("namespace", event.Namespace),
+					zap.String("pod", event.PodName),
+					zap.String("binary", event.Binary),
+					zap.Uint32("pid", event.PID),
+					zap.String("parent_binary", event.ParentBinary),
+				)
 			}
 		}()
 	}
@@ -91,7 +87,9 @@ func main() {
 	}
 	tetraClient := collector.NewClient(clientConfig, eventBuffer, logger)
 
+	clientDone := make(chan struct{})
 	go func() {
+		defer close(clientDone)
 		if err := tetraClient.Start(ctx); err != nil {
 			logger.Error("Tetragon client stopped with error", zap.Error(err))
 		}
@@ -101,9 +99,15 @@ func main() {
 	sig := <-sigChan
 	logger.Info("received termination signal, initiating graceful shutdown", zap.String("signal", sig.String()))
 
+	// 1. Stop client stream
 	cancel()
+	<-clientDone
 
-	// Shutdown metrics server
+	// 2. Close buffer and wait for all workers to finish draining
+	eventBuffer.Close()
+	wg.Wait()
+
+	// 3. Shutdown metrics server
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer shutdownCancel()
 	_ = metricsServer.Shutdown(shutdownCtx)

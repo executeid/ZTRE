@@ -31,114 +31,78 @@ func (p *Parser) Parse(res *tetragon.GetEventsResponse) (*SecurityEvent, error) 
 		eventTime = res.GetTime().AsTime()
 	}
 
+	nodeName := res.GetNodeName()
+
 	switch ev := res.GetEvent().(type) {
 	case *tetragon.GetEventsResponse_ProcessExec:
-		exec := ev.ProcessExec
-		if exec == nil || exec.GetProcess() == nil {
+		if ev.ProcessExec == nil {
 			return nil, nil
 		}
-
-		proc := exec.GetProcess()
-		parent := exec.GetParent()
-		pod := proc.GetPod()
-
-		// If the process does not originate from a Kubernetes Pod, we ignore host-level OS noise
-		if pod == nil || pod.GetNamespace() == "" {
-			return nil, nil
-		}
-
-		secEvent := &SecurityEvent{
-			Timestamp:    eventTime,
-			EventType:    EventTypeExecve,
-			PID:          proc.GetPid().GetValue(),
-			Binary:       proc.GetBinary(),
-			Arguments:    proc.GetArguments(),
-			Namespace:    pod.GetNamespace(),
-			PodName:      pod.GetName(),
-			NodeName:     res.GetNodeName(),
-			WorkloadKind: pod.GetWorkloadKind(),
-			WorkloadName: pod.GetWorkload(),
-			RawResponse:  res,
-		}
-
-		if pod.GetContainer() != nil {
-			secEvent.ContainerID = pod.GetContainer().GetId()
-		}
-
-		if parent != nil {
-			secEvent.ParentPID = parent.GetPid().GetValue()
-			secEvent.ParentBinary = parent.GetBinary()
-		}
-
-		return secEvent, nil
+		return p.buildSecurityEvent(ev.ProcessExec.GetProcess(), ev.ProcessExec.GetParent(), EventTypeExecve, nodeName, eventTime), nil
 
 	case *tetragon.GetEventsResponse_ProcessExit:
-		exit := ev.ProcessExit
-		if exit == nil || exit.GetProcess() == nil {
+		if ev.ProcessExit == nil {
 			return nil, nil
 		}
-
-		proc := exit.GetProcess()
-		pod := proc.GetPod()
-		if pod == nil || pod.GetNamespace() == "" {
-			return nil, nil
-		}
-
-		secEvent := &SecurityEvent{
-			Timestamp:    eventTime,
-			EventType:    EventTypeExit,
-			PID:          proc.GetPid().GetValue(),
-			Binary:       proc.GetBinary(),
-			Arguments:    proc.GetArguments(),
-			Namespace:    pod.GetNamespace(),
-			PodName:      pod.GetName(),
-			NodeName:     res.GetNodeName(),
-			WorkloadKind: pod.GetWorkloadKind(),
-			WorkloadName: pod.GetWorkload(),
-			RawResponse:  res,
-		}
-
-		return secEvent, nil
+		return p.buildSecurityEvent(ev.ProcessExit.GetProcess(), ev.ProcessExit.GetParent(), EventTypeExit, nodeName, eventTime), nil
 
 	case *tetragon.GetEventsResponse_ProcessKprobe:
-		kprobe := ev.ProcessKprobe
-		if kprobe == nil || kprobe.GetProcess() == nil {
+		if ev.ProcessKprobe == nil {
 			return nil, nil
 		}
-
-		proc := kprobe.GetProcess()
-		pod := proc.GetPod()
-		if pod == nil || pod.GetNamespace() == "" {
-			return nil, nil
-		}
-
-		secEvent := &SecurityEvent{
-			Timestamp:    eventTime,
-			EventType:    EventTypeKprobe,
-			PID:          proc.GetPid().GetValue(),
-			Binary:       proc.GetBinary(),
-			Arguments:    proc.GetArguments(),
-			Namespace:    pod.GetNamespace(),
-			PodName:      pod.GetName(),
-			NodeName:     res.GetNodeName(),
-			WorkloadKind: pod.GetWorkloadKind(),
-			WorkloadName: pod.GetWorkload(),
-			RawResponse:  res,
-		}
-
-		if pod.GetContainer() != nil {
-			secEvent.ContainerID = pod.GetContainer().GetId()
-		}
-
-		if parent := kprobe.GetParent(); parent != nil {
-			secEvent.ParentPID = parent.GetPid().GetValue()
-			secEvent.ParentBinary = parent.GetBinary()
-		}
-
-		return secEvent, nil
+		return p.buildSecurityEvent(ev.ProcessKprobe.GetProcess(), ev.ProcessKprobe.GetParent(), EventTypeKprobe, nodeName, eventTime), nil
 
 	default:
 		// Other event types (throttling, loader, etc.) can be safely skipped
 		return nil, nil
 	}
+}
+
+func (p *Parser) buildSecurityEvent(
+	proc *tetragon.Process,
+	parent *tetragon.Process,
+	eventType EventType,
+	nodeName string,
+	eventTime time.Time,
+) *SecurityEvent {
+	if proc == nil {
+		return nil
+	}
+
+	pod := proc.GetPod()
+	// If the process does not originate from a Kubernetes Pod, we ignore host-level OS noise
+	if pod == nil || pod.GetNamespace() == "" {
+		return nil
+	}
+
+	var pid uint32
+	if proc.GetPid() != nil {
+		pid = proc.GetPid().GetValue()
+	}
+
+	secEvent := &SecurityEvent{
+		Timestamp:    eventTime,
+		EventType:    eventType,
+		PID:          pid,
+		Binary:       proc.GetBinary(),
+		Arguments:    proc.GetArguments(),
+		Namespace:    pod.GetNamespace(),
+		PodName:      pod.GetName(),
+		NodeName:     nodeName,
+		WorkloadKind: pod.GetWorkloadKind(),
+		WorkloadName: pod.GetWorkload(),
+	}
+
+	if pod.GetContainer() != nil {
+		secEvent.ContainerID = pod.GetContainer().GetId()
+	}
+
+	if parent != nil {
+		if parent.GetPid() != nil {
+			secEvent.ParentPID = parent.GetPid().GetValue()
+		}
+		secEvent.ParentBinary = parent.GetBinary()
+	}
+
+	return secEvent
 }

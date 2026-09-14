@@ -65,15 +65,22 @@ func (c *Client) Start(ctx context.Context) error {
 		}
 
 		c.logger.Info("connecting to Tetragon gRPC server", zap.String("socket", c.config.SocketPath))
+		startTime := time.Now()
 		err := c.streamEvents(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
+			// If stream ran successfully for at least 5 seconds before failing, reset backoff
+			if time.Since(startTime) >= 5*time.Second {
+				backoff = c.config.ReconnectInterval
+			}
 			c.logger.Error("Tetragon event stream disconnected",
 				zap.Error(err),
 				zap.Duration("retry_in", backoff),
 			)
+		} else {
+			backoff = c.config.ReconnectInterval
 		}
 
 		select {
@@ -110,17 +117,14 @@ func (c *Client) streamEvents(ctx context.Context) error {
 	c.logger.Info("Tetragon gRPC event stream established successfully")
 
 	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
-
 		res, err := stream.Recv()
 		if err == io.EOF {
 			return fmt.Errorf("Tetragon stream closed by server (EOF)")
 		}
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
 			return fmt.Errorf("error reading from Tetragon stream: %w", err)
 		}
 
