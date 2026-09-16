@@ -28,6 +28,9 @@ spec:
       - name: ztre-agent
         image: ztre-agent:v0.1.0
         imagePullPolicy: Never  # Image loaded locally via ctr import
+        securityContext:
+          runAsUser: 0
+          runAsGroup: 0
         args:
         - "-tetragon-socket=/var/run/tetragon/tetragon.sock"
         - "-metrics-addr=:9090"
