@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ztre-agent
+  namespace: ztre-system
+  labels:
+    app.kubernetes.io/name: ztre-agent
+    app.kubernetes.io/part-of: ztre
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ztre-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ztre-agent
+    spec:
+      serviceAccountName: ztre-agent
+      # Only run on worker nodes (skip control-plane)
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: DoesNotExist
+      containers:
+      - name: ztre-agent
+        image: ztre-agent:v0.1.0
+        imagePullPolicy: Never  # Image loaded locally via ctr import
+        args:
+        - "-tetragon-socket=/var/run/tetragon/tetragon.sock"
+        - "-metrics-addr=:9090"
+        - "-buffer-size=50000"
+        - "-debug"
+        ports:
+        - name: metrics
+          containerPort: 9090
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: metrics
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: metrics
+          initialDelaySeconds: 3
+          periodSeconds: 5
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        volumeMounts:
+        - name: tetragon-sock
+          mountPath: /var/run/tetragon/tetragon.sock
+          readOnly: true
+      volumes:
+      - name: tetragon-sock
+        hostPath:
+          path: /var/run/tetragon/tetragon.sock
+          type: Socket
