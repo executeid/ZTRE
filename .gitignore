@@ -1,0 +1,9 @@
+# Binaries
+/ztre-agent
+*.test
+*.out
+
+# Runtime data & snapshots
+/data/discovery/*.json
+/data/discovery/*.yaml
+!/data/discovery/.gitkeep
