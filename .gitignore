@@ -2,7 +2,7 @@
 /ztre-agent
 *.test
 *.out
-
+/.pi
 # Runtime data & snapshots
 /data/discovery/*.json
 /data/discovery/*.yaml
