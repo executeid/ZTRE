@@ -7,6 +7,18 @@ tetragon:
   reconnect_interval_ms: 2000
   buffer_size: 50000
 
+agent:
+  mode: "discovery"    # discovery | shadow | enforcement
+  worker_count: 4
+  discovery:
+    learning_window: 72h
+    snapshot_interval: 1h
+    stability_threshold: 4h
+    max_snapshots: 24
+    auto_generate_whitelist: true
+    output_dir: "data/discovery"
+    whitelist_path: "data/discovery/auto_whitelist.yaml"
+
 decision_engine:
   thresholds:
     green_max: 39   # < 40 -> ALLOW_AND_LOG

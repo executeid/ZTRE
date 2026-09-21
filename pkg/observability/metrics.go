@@ -2,6 +2,8 @@ package observability
 
 import (
 	"context"
+	"errors"
+	"net"
 	"net/http"
 	"time"
 
@@ -39,12 +41,84 @@ var (
 			Buckets:   []float64{0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01}, // 10µs to 10ms
 		},
 	)
+
+	// Discovery metrics (Stage 2.5)
+	DiscoveryPatternsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: "ztre",
+			Subsystem: "discovery",
+			Name:      "patterns_observed_total",
+			Help:      "Total unique parent→child execution patterns discovered.",
+		},
+	)
+
+	DiscoveryEventsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: "ztre",
+			Subsystem: "discovery",
+			Name:      "events_tracked_total",
+			Help:      "Total events processed in discovery mode.",
+		},
+	)
+
+	DiscoveryStabilityGauge = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "ztre",
+			Subsystem: "discovery",
+			Name:      "stability_status",
+			Help:      "Baseline stability status (0=LEARNING, 1=STABILIZING, 2=STABLE).",
+		},
+	)
+
+	AgentModeGauge = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "ztre",
+			Subsystem: "agent",
+			Name:      "mode",
+			Help:      "Current agent mode (0=discovery, 1=shadow, 2=enforcement).",
+		},
+	)
+
+	ShadowDecisionsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "ztre",
+			Subsystem: "shadow",
+			Name:      "decisions_total",
+			Help:      "Shadow mode decisions — what would have happened.",
+		},
+		[]string{"action"},
+	)
 )
 
 func init() {
-	prometheus.MustRegister(EventsIngestedTotal)
-	prometheus.MustRegister(EventsDroppedTotal)
-	prometheus.MustRegister(EventParseDuration)
+	RegisterMetrics()
+}
+
+// RegisterMetrics registers all Prometheus metrics with the default registry.
+// It catches prometheus.AlreadyRegisteredError to ensure idempotent registration.
+func RegisterMetrics() {
+	registerSafe(
+		EventsIngestedTotal,
+		EventsDroppedTotal,
+		EventParseDuration,
+		DiscoveryPatternsTotal,
+		DiscoveryEventsTotal,
+		DiscoveryStabilityGauge,
+		AgentModeGauge,
+		ShadowDecisionsTotal,
+	)
+}
+
+func registerSafe(collectors ...prometheus.Collector) {
+	for _, c := range collectors {
+		if err := prometheus.Register(c); err != nil {
+			var are prometheus.AlreadyRegisteredError
+			if errors.As(err, &are) {
+				continue
+			}
+			panic(err)
+		}
+	}
 }
 
 // StartMetricsServer starts an HTTP server serving Prometheus metrics on the given address.
@@ -63,11 +137,25 @@ func StartMetricsServer(ctx context.Context, addr string, logger *zap.Logger) *h
 		WriteTimeout: 10 * time.Second,
 	}
 
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		logger.Error("failed to listen on metrics addr", zap.String("addr", addr), zap.Error(err))
+		return srv
+	}
+	srv.Addr = ln.Addr().String()
+
 	go func() {
-		logger.Info("metrics and health server listening", zap.String("addr", addr))
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		logger.Info("metrics and health server listening", zap.String("addr", srv.Addr))
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			logger.Error("metrics server error", zap.Error(err))
 		}
+	}()
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
 	}()
 
 	return srv
