@@ -56,7 +56,7 @@ In Kubernetes, hundreds of processes can be spawned every second. If an attacker
 │     • 4 concurrent Go worker routines consume events from buffer               │
 │     • sync.WaitGroup ensures graceful drain on shutdown                        │
 │     • Logs structured JSON with Zap                                            │
-│     • Ready to forward events to Stage 3 Validation Engine                     │
+│     • Ready to forward events to Stage 2.5 Discovery Engine                    │
 │                                      │                                         │
 │  5. Observability (pkg/observability/metrics.go)                               │
 │     • Exposes Prometheus metrics on :9090/metrics                               │
@@ -334,7 +334,7 @@ Let's trace what happens when an attacker executes `whoami` inside a pod:
    ```
 6. **Buffering (`buffer.go`):** The event is pushed into the buffered channel in $< 1\mu\text{s}$ (197 ns benchmarked). The `isClosed` atomic check ensures the buffer is accepting events.
 7. **Worker Processing (`main.go`):** An idle worker goroutine dequeues the event, increments Prometheus counters, and emits a structured log.
-8. **Forwarding to Stage 3:** In Stage 3, this worker will pass the event directly into the **Lineage Validator** and **Risk Scoring Engine** instead of logging.
+8. **Forwarding to Stage 2.5 Discovery:** In Stage 2.5, this worker will pass the event into the **Behavioral Discovery Engine** (`BehaviorTracker`) which accumulates parent→child frequency maps to build an empirical baseline. Once the baseline is stable and the agent transitions to enforcement mode (Stage 3), the worker will instead pass the event into the **Lineage Validator** and **Risk Scoring Engine**.
 
 ---
 

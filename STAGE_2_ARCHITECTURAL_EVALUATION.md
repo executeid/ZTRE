@@ -230,8 +230,22 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    subgraph "Stage 3-4 - What Must Be Added"
-        E2["Workers"] -->|"*SecurityEvent"| V["Lineage\nValidator\n(FR-02)"]
+    subgraph "Stage 2.5 - Behavioral Discovery (NEW)"
+        E2["Workers"] -->|"*SecurityEvent"| MR["Mode\nRouter"]
+        MR -->|"DISCOVERY\nmode"| BT["Behavior\nTracker\n(pkg/discovery/)"]
+        BT -->|"patterns"| BS["Baseline\nStore\n(snapshots)"]
+        BS -->|"stable"| BR["Baseline\nReporter"]
+        BR -->|"generates"| AW["auto_whitelist\n.yaml"]
+        BR -->|"generates"| RP["baseline_report\n.json"]
+    end
+```
+
+```mermaid
+flowchart LR
+    subgraph "Stage 2.5 Shadow → Stage 3-4 Enforcement"
+        MR2["Mode\nRouter"] -->|"SHADOW\nmode"| V2["Lineage\nValidator\n(FR-02)"]
+        V2 -->|"log only\n(no enforce)"| SL["Shadow\nLog"]
+        MR2 -->|"ENFORCEMENT\nmode"| V["Lineage\nValidator\n(FR-02)"]
         V -->|"SUSPICIOUS/\nANOMALOUS"| R["Risk\nEngine\n(FR-03)"]
         V -->|"NORMAL"| L2["Audit Log"]
         R -->|"RiskScore"| DE["Decision\nEngine\n(FR-04)"]
@@ -273,30 +287,35 @@ flowchart LR
 
 ---
 
-## 6. Stage 3 Readiness Assessment
+## 6. Stage 2.5 & Stage 3 Readiness Assessment
 
-### ✅ Ready
+### ✅ Ready for Stage 2.5 (Behavioral Discovery)
 
-- **Data model is lean and complete.** `SecurityEvent` has all fields needed for lineage validation (`Binary`, `ParentBinary`, `ParentPID`, `Namespace`, `PodName`, `ContainerID`, `WorkloadKind`, `WorkloadName`). No Protobuf baggage.
-- **All event types extract parent data.** `ProcessExit` events now carry `ParentBinary` and `ParentPID`, critical for lineage validation.
-- **Buffer/worker architecture is correct.** Workers just need to call `validator.Classify(event)` instead of logging. Graceful drain ensures no events lost during controlled shutdown.
-- **Metrics infrastructure is in place.** Adding `ztre_events_classified_total{status}` is straightforward.
+- **Data model is lean and complete.** `SecurityEvent` has all fields needed for behavioral tracking (`Binary`, `ParentBinary`, `Namespace`, `PodName`, `WorkloadKind`, `WorkloadName`). No Protobuf baggage.
+- **All event types extract parent data.** `ProcessExit` events now carry `ParentBinary` and `ParentPID`, critical for building accurate parent→child frequency maps.
+- **Buffer/worker architecture is correct.** Workers just need to call `discoveryEngine.Track(event)` instead of logging. The mode router will direct events based on the agent's operational mode (discovery / shadow / enforcement).
+- **Metrics infrastructure is in place.** Adding `ztre_discovery_patterns_observed_total` and `ztre_discovery_events_tracked_total` is straightforward.
+- **Shutdown lifecycle is production-grade.** Ordered: stop producer → close buffer → drain workers → shutdown HTTP. Discovery snapshots should be flushed during graceful shutdown.
+
+### ✅ Ready for Stage 3 (after Stage 2.5 completes)
+
+- **Whitelist will be data-driven.** The auto-generated `auto_whitelist.yaml` from Stage 2.5's `BaselineReporter` will feed directly into the Stage 3 whitelist loader. The manually-curated `process_lineage_whitelist.yaml` can supplement or override it.
+- **Shadow mode validates before enforcement.** Before enabling full enforcement, shadow mode will log "would-have" decisions — allowing operators to measure false positive rates and tune the whitelist.
 - **Config files are pre-written.** `process_lineage_whitelist.yaml` and `risk_scoring_policy.yaml` match the PRD schema.
-- **Shutdown lifecycle is production-grade.** Ordered: stop producer → close buffer → drain workers → shutdown HTTP.
 
-### 🔧 Recommended Pre-Stage-3 Enhancements (Priority Order)
+### 🔧 Recommended Pre-Stage-2.5 Enhancements (Priority Order)
 
 | # | Item | Why | Effort |
 |---|---|---|---|
-| 1 | **Add `pkg/config/` YAML loader with hot-reload** | Stage 3.1 requires loading `process_lineage_whitelist.yaml` with file watcher | Medium |
-| 2 | **Add worker count CLI flag** | Stage 3 workers will do real computation (validation + scoring); count should be tunable | Trivial |
+| 1 | **Add `pkg/config/` YAML loader with hot-reload** | Stage 2.5 requires loading `agent_config.yaml` for mode settings; Stage 3 requires loading whitelists | Medium |
+| 2 | **Add worker count CLI flag** | Stage 2.5+ workers will do real computation (tracking/validation); count should be tunable | Trivial |
 | 3 | **Change worker logging from `Info` to `Debug`** | Prevent I/O saturation at production throughput | Trivial |
 | 4 | **Add `EventID` (UUID) field to `SecurityEvent`** | Stage 3 audit log format expects `event_id: "uuid"` for pipeline tracing | Trivial |
 | 5 | **Migrate metrics to custom registry** | Prevent `MustRegister` panics when integration tests import both packages | Low |
 
-### ⚠️ Nothing Blocks Stage 3
+### ⚠️ Nothing Blocks Stage 2.5
 
-All initial 🔴 High and 🟡 Medium findings have been resolved. The remaining findings are all 🟢 Low/Info severity and can be addressed incrementally during Stage 3 development.
+All initial 🔴 High and 🟡 Medium findings have been resolved. The remaining findings are all 🟢 Low/Info severity and can be addressed incrementally during Stage 2.5 development. The introduction of Stage 2.5 (Behavioral Discovery) before Stage 3 is a major architectural decision that ensures the validation and risk scoring pipeline operates on empirically-grounded data rather than manually-guessed whitelists.
 
 ---
 
@@ -322,9 +341,9 @@ All initial 🔴 High and 🟡 Medium findings have been resolved. The remaining
 
 ### 8.1 The Config Gap
 
-The agent currently uses **CLI flags** ([`main.go#L18-L29`](file:///home/execute/ZTRE/cmd/ztre-agent/main.go#L18-L29)) exclusively. The three config files in `config/` exist but are **never loaded**. Stage 3 *requires* loading `process_lineage_whitelist.yaml` and `risk_scoring_policy.yaml`.
+The agent currently uses **CLI flags** ([`main.go#L18-L29`](file:///home/execute/ZTRE/cmd/ztre-agent/main.go#L18-L29)) exclusively. The three config files in `config/` exist but are **never loaded**. Stage 2.5 *requires* loading `agent_config.yaml` for mode settings (`discovery` / `shadow` / `enforcement`) and discovery parameters (`learning_window`, `snapshot_interval`, `stability_threshold`). Stage 3 additionally requires loading `process_lineage_whitelist.yaml` and `risk_scoring_policy.yaml`.
 
-You'll need a `pkg/config/` package with YAML loader + hot-reload (file watcher). Plan this before starting Stage 3.
+You'll need a `pkg/config/` package with YAML loader + hot-reload (file watcher). Plan this before starting Stage 2.5.
 
 > [!NOTE]
 > The `agent_config.yaml` defines separate `metrics_port: 9090` and `health_port: 8080`, but the actual implementation serves both `/metrics` and `/healthz` on the same `:9090` address. Reconcile the config schema with the implementation when building the config loader.
@@ -347,6 +366,20 @@ Currently, every event is logged at `Info` level via Zap JSON to stdout. At prod
 ### 8.5 PRD vs. Reality: "Python Agent"
 
 The PRD §6.1 says *"user-space **Python** agent"* but the project correctly uses Go. The PRD should be updated to reflect this (or a separate "Decisions Log" document should capture the rationale: performance requirements, Tetragon SDK availability, single-binary deployment). This matters for thesis/portfolio presentation.
+
+### 8.6 Behavioral Discovery as Architectural Foundation
+
+**Stage 2.5 (Behavioral Discovery & Baseline Learning)** has been introduced as a new intermediate stage between Event Pipeline (Stage 2) and Validation & Scoring (Stage 3). This is a **major architectural decision** motivated by a critical insight: without observing real workload behavior, the process lineage whitelist would be a manually-crafted guess — leading to excessive false positives in production.
+
+Key architectural impacts:
+- **New package:** `pkg/discovery/` with `tracker.go`, `baseline.go`, `reporter.go`, `types.go`
+- **Tri-modal agent:** Discovery → Shadow → Enforcement progression, controlled via `agent_config.yaml`
+- **Mode router in `main.go`:** Workers now route events through a mode-aware pipeline instead of directly processing
+- **Auto-generated whitelists:** `auto_whitelist.yaml` is machine-generated from observed data with confidence scores, replacing/supplementing the manually-curated whitelist
+- **Shadow validation:** Dry-run mode lets operators verify whitelist quality and false positive rates before enabling enforcement
+- **Timeline impact:** Total project duration extends from 12 to 14 weeks (2 additional weeks for discovery)
+
+This aligns with industry best practices — every serious runtime security platform (Falco, Aqua, Sysdig) includes a learning/baseline phase. The discovery phase does not replace existing Stage 3 design; it feeds it better data.
 
 ---
 

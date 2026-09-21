@@ -2,7 +2,7 @@
 
 **Generated Date:** 2026-09-13  
 **Target Environment:** `bastion` (`10.91.128.10`) & Kubernetes Cluster  
-**Project:** Zero-Trust Runtime Enforcement (ZTRE)  
+**Project:** Zero-Trust Response Engine (ZTRE)  
 **Reference Document:** [DEVELOPMENT_ROADMAP.md](./DEVELOPMENT_ROADMAP.md)  
 **Stage 1 Status:** 🟢 **100% COMPLETED & VERIFIED**  
 **Stage 2 Status:** 🟢 **100% COMPLETED & VERIFIED**
@@ -87,10 +87,33 @@ Graceful shutdown verified live:
 
 ---
 
-## 5. Next Phase: Stage 3 — Validation & Scoring (FR-02, FR-03)
+## 5. Next Phase: Stage 2.5 — Behavioral Discovery & Baseline Learning
 
+> **Architectural Decision (v1.1.0):** A new Stage 2.5 has been introduced between Event Pipeline (Stage 2) and Validation & Scoring (Stage 3). Without observing real workload behavior, the process lineage whitelist would be a manually-crafted guess — leading to excessive false positives. Stage 2.5 ensures the whitelist is empirically grounded in observed cluster behavior.
+
+**Agent Operational Modes:**
+```
+DISCOVERY (passive observe) → SHADOW (classify but don't enforce) → ENFORCEMENT (full Stage 3+4)
+```
+
+1. **Step 2.5.1 — Discovery Data Model (`pkg/discovery/types.go`):**
+   Define `ExecutionPattern`, `LineageProfile`, `BaselineSnapshot`, and `PatternStats` data structures for tracking observed parent→child execution pairs.
+2. **Step 2.5.2 — Behavior Tracker (`pkg/discovery/tracker.go`):**
+   Core engine that receives `SecurityEvent`s and maintains concurrent-safe in-memory frequency maps of parent→child relationships per namespace/workload.
+3. **Step 2.5.3 — Baseline Store & Stability Detection (`pkg/discovery/baseline.go`):**
+   Persistence layer with periodic snapshots and automatic stability detection (no new patterns for configurable window = baseline converged).
+4. **Step 2.5.4 — Baseline Reporter & Auto-Whitelist Generation (`pkg/discovery/reporter.go`):**
+   Generate `baseline_report.json` and auto-generate `config/auto_whitelist.yaml` from observed data with confidence scoring.
+5. **Step 2.5.5 — Agent Mode Router (`cmd/ztre-agent/main.go`):**
+   Tri-modal operation (discovery / shadow / enforcement) with mode-aware event routing.
+6. **Step 2.5.6 — Shadow Mode Integration:**
+   Dry-run validation — run classification and scoring but only log decisions, don't enforce containment.
+7. **Step 2.5.7 — Discovery Integration Testing:**
+   End-to-end test on live cluster: observe real workloads, validate baseline, verify auto-generated whitelist.
+
+**After Stage 2.5 completes, proceed to Stage 3 (Validation & Scoring):**
 1. **Step 3.1 — Process Lineage Whitelist Loader (`pkg/validator/whitelist.go`):**
-   Parse `config/process_lineage_whitelist.yaml` with file-watcher for dynamic hot-reload.
+   Parse `config/auto_whitelist.yaml` (auto-generated) and `config/process_lineage_whitelist.yaml` (manual overrides) with file-watcher for dynamic hot-reload.
 2. **Step 3.2 — Lineage Validator Engine (`pkg/validator/validator.go`):**
    Classify incoming events into `NORMAL`, `SUSPICIOUS`, or `ANOMALOUS` in < 10ms.
 3. **Step 3.3 — Multidimensional Risk Scoring Engine (`pkg/risk/engine.go`):**

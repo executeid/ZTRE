@@ -9,23 +9,26 @@
 | **Document Version** | 1.0.0 |
 | **Date** | 2026-09-08 |
 | **Based On** | [PRD.md](./PRD.md) v1.0.0 |
-| **Total Stages** | 6 |
-| **Total Steps** | 27 |
+| **Total Stages** | 7 (including Stage 2.5) |
+| **Total Steps** | 34 |
 
 ---
 
 ## Overview
 
-This document breaks the ZTRE development into **6 sequential stages**, each with concrete steps, deliverables, acceptance gates, and PRD traceability. Stages are ordered by dependency — each stage builds on the outputs of the previous one.
+This document breaks the ZTRE development into **7 sequential stages**, each with concrete steps, deliverables, acceptance gates, and PRD traceability. Stages are ordered by dependency — each stage builds on the outputs of the previous one.
 
 ```
-Stage 1          Stage 2          Stage 3          Stage 4          Stage 5          Stage 6
-───────          ───────          ───────          ───────          ───────          ───────
-Foundation  ──►  Event        ──►  Validation  ──►  Decision &   ──►  Integration  ──►  Hardening
-& Infra          Pipeline         & Scoring        Containment      Testing          & Release
+Stage 1          Stage 2          Stage 2.5           Stage 3          Stage 4          Stage 5          Stage 6
+───────          ───────          ─────────           ───────          ───────          ───────          ───────
+Foundation  ──►  Event        ──►  Behavioral     ──►  Validation  ──►  Decision &   ──►  Integration  ──►  Hardening
+& Infra          Pipeline         Discovery &         & Scoring        Containment      Testing          & Release
+                                  Baseline Learning
 
- Weeks 1–2        Weeks 3–4        Weeks 5–6        Weeks 7–8        Weeks 9–10       Weeks 11–12
+ Weeks 1–2        Weeks 3–4        Weeks 5–6           Weeks 7–8        Weeks 9–10       Weeks 11–12      Weeks 13–14
 ```
+
+> **Architectural Decision (v1.1.0):** Stage 2.5 was introduced to establish a data-driven behavioral baseline before validation and risk scoring. Without observing real workload behavior, the process lineage whitelist would be a manually-crafted guess — leading to excessive false positives and an incomplete security posture. Stage 2.5 ensures the whitelist used by Stage 3 is empirically grounded in observed cluster behavior.
 
 ---
 
@@ -252,12 +255,338 @@ Foundation  ──►  Event        ──►  Validation  ──►  Decision &
 
 ---
 
-## Stage 3 — Validation & Risk Scoring (FR-02, FR-03)
+## Stage 2.5 — Behavioral Discovery & Baseline Learning
 
-> **Goal:** Build the process lineage validator and the multidimensional risk scoring engine.
+> **Goal:** Observe real-world execution patterns passively, build an empirical behavioral baseline, auto-generate a data-driven process lineage whitelist, and provide a shadow validation mode — all before enabling enforcement.
 
 **Duration:** Weeks 5–6
+**PRD References:** FR-02 (Context-Aware Threat Validation — data foundation), O1 (Context-Aware Threat Validation)
+**Rationale:** Every Kubernetes cluster has unique workloads. A hand-crafted whitelist will be incomplete on day one, generating massive false positives. Discovery ensures the whitelist is empirically grounded in observed cluster behavior.
+
+### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  DISCOVERY ENGINE (pkg/discovery/)                              │
+│                                                                 │
+│  EventBuffer ──► BehaviorTracker ──► BaselineStore              │
+│                                                                 │
+│  • Accumulates parent→child execution pairs                     │
+│  • Counts frequency per (namespace, workload, parent, child)    │
+│  • Tracks first-seen / last-seen timestamps                     │
+│  • Records execution context (time-of-day, node, container)     │
+│  • NO blocking, NO alerting — pure observation                  │
+│                                                                 │
+│  Output: baseline_report.json + auto_whitelist.yaml             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Step 2.5.1 — Discovery Data Model
+
+| Item | Details |
+|---|---|
+| **Action** | Define data structures for tracking observed execution patterns and workload behavioral profiles |
+| **Deliverable** | `pkg/discovery/types.go` with `ExecutionPattern`, `LineageProfile`, `BaselineSnapshot`, `PatternStats` structs |
+
+**Tasks:**
+- [ ] Define `ExecutionPattern` struct:
+  ```go
+  type ExecutionPattern struct {
+      ParentBinary  string    `json:"parent_binary"`
+      ChildBinary   string    `json:"child_binary"`
+      Namespace     string    `json:"namespace"`
+      WorkloadName  string    `json:"workload_name"`
+      Count         uint64    `json:"count"`          // how many times observed
+      FirstSeen     time.Time `json:"first_seen"`
+      LastSeen      time.Time `json:"last_seen"`
+      Nodes         []string  `json:"nodes"`          // which nodes
+  }
+  ```
+- [ ] Define `LineageProfile` struct (aggregated baseline per workload):
+  ```go
+  type LineageProfile struct {
+      Namespace       string              `json:"namespace"`
+      WorkloadName    string              `json:"workload_name"`
+      WorkloadKind    string              `json:"workload_kind"`
+      Patterns        []ExecutionPattern  `json:"patterns"`
+      TotalEvents     uint64              `json:"total_events"`
+      UniqueProcesses int                 `json:"unique_processes"`
+      StableAfter     time.Time           `json:"stable_after"`
+  }
+  ```
+- [ ] Define `PatternStats` struct for statistical analysis:
+  ```go
+  type PatternStats struct {
+      Frequency     float64 // events per hour
+      IsBurst       bool    // only appears in short bursts
+      IsRecurring   bool    // appears consistently across time windows
+      IsCrossNode   bool    // appears on multiple nodes (expected for DaemonSets)
+      Percentile    float64 // where this pattern falls in frequency distribution
+      ZScore        float64 // standard deviations from mean frequency
+  }
+  ```
+- [ ] Define `BaselineSnapshot` struct for periodic persistence
+- [ ] Unit tests for struct serialization/deserialization (JSON round-trip)
+
+### Step 2.5.2 — Behavior Tracker
+
+| Item | Details |
+|---|---|
+| **Action** | Implement the core tracker that receives `SecurityEvent`s and maintains in-memory frequency maps of observed parent→child execution pairs |
+| **Deliverable** | `pkg/discovery/tracker.go` — `BehaviorTracker` struct with `Track(event)` method |
+| **Dependency** | Step 2.5.1 |
+
+**Tasks:**
+- [ ] Implement `BehaviorTracker` with concurrent-safe map (`sync.RWMutex` or `sync.Map`):
+  ```go
+  type BehaviorTracker struct {
+      mu       sync.RWMutex
+      patterns map[string]*ExecutionPattern  // key: "namespace/workload/parent→child"
+      profiles map[string]*LineageProfile    // key: "namespace/workload"
+      started  time.Time
+  }
+  ```
+- [ ] `Track(event *collector.SecurityEvent)` — updates frequency count, first-seen/last-seen timestamps, node list
+- [ ] `GetPatterns() []ExecutionPattern` — returns a snapshot of all observed patterns
+- [ ] `GetProfile(namespace, workload string) *LineageProfile` — returns the behavioral profile for a specific workload
+- [ ] `GetStats() map[string]*PatternStats` — computes frequency, z-score, burst detection for each pattern
+- [ ] Handle edge cases: empty parent binary (init processes), system namespaces (`kube-system`), sidecar containers
+- [ ] Add Prometheus metrics:
+  - `ztre_discovery_patterns_observed_total` — counter of unique parent→child pairs discovered
+  - `ztre_discovery_events_tracked_total` — counter of total events processed in discovery mode
+- [ ] Benchmark: tracking overhead < 1μs per event (must not slow down the pipeline)
+- [ ] Unit tests:
+  - [ ] Track multiple events → verify correct frequency counts
+  - [ ] Track events from multiple namespaces → verify separate profiles
+  - [ ] Concurrent access from 4 workers → no races (`go test -race`)
+
+### Step 2.5.3 — Baseline Store & Stability Detection
+
+| Item | Details |
+|---|---|
+| **Action** | Implement persistence for baseline snapshots and automatic stability detection (determines when the baseline has converged) |
+| **Deliverable** | `pkg/discovery/baseline.go` — `BaselineStore` struct with snapshot persistence and stability check |
+| **Dependency** | Step 2.5.2 |
+
+**Tasks:**
+- [ ] Implement `BaselineStore` with periodic snapshot persistence:
+  ```go
+  type BaselineStore struct {
+      tracker         *BehaviorTracker
+      snapshotDir     string            // e.g., "data/discovery/"
+      snapshotInterval time.Duration    // e.g., 1 hour
+      stabilityWindow  time.Duration    // e.g., 4 hours of no new patterns
+  }
+  ```
+- [ ] `SaveSnapshot()` — serializes current patterns to `data/discovery/baseline_YYYYMMDD_HHMMSS.json`
+- [ ] `LoadLatestSnapshot()` — loads the most recent snapshot on agent restart (resume learning)
+- [ ] `IsStable() bool` — returns `true` if no new unique parent→child pairs have been observed for the configured `stabilityWindow`
+- [ ] `GetStabilityStatus() StabilityStatus` — returns `LEARNING`, `STABILIZING`, or `STABLE` with metadata (new patterns in last window, time since last new pattern)
+- [ ] Periodic snapshot loop as a goroutine with context cancellation
+- [ ] Log stability transitions: `LEARNING → STABILIZING → STABLE`
+- [ ] Add Prometheus gauge: `ztre_discovery_stability_status` (0=LEARNING, 1=STABILIZING, 2=STABLE)
+- [ ] Unit tests:
+  - [ ] Save/load round-trip preserves all pattern data
+  - [ ] Stability detection triggers after configured window with no new patterns
+  - [ ] New pattern resets stability timer
+
+### Step 2.5.4 — Baseline Reporter & Auto-Whitelist Generation
+
+| Item | Details |
+|---|---|
+| **Action** | Generate human-readable discovery reports and auto-generate `process_lineage_whitelist.yaml` from observed baseline data |
+| **Deliverable** | `pkg/discovery/reporter.go` — `BaselineReporter` struct that outputs `baseline_report.json` and `auto_whitelist.yaml` |
+| **Dependency** | Step 2.5.3 |
+
+**Tasks:**
+- [ ] Implement `GenerateReport() *BaselineReport` with:
+  - Learning window (start/end timestamps)
+  - Total events observed
+  - Unique lineage pairs discovered
+  - Per-workload behavioral profiles
+  - Anomaly candidates (patterns with z-score > 2.0 — rare even during learning)
+  - Stability status and recommendation
+- [ ] Implement `GenerateWhitelist() WhitelistConfig` — converts high-confidence observed patterns into the `process_lineage_whitelist.yaml` format:
+  ```yaml
+  # AUTO-GENERATED by ZTRE Discovery Engine
+  # Learning window: 2026-09-15T00:00Z → 2026-09-18T00:00Z
+  # Total events observed: 1,247,832
+  
+  whitelisted_lineages:
+    - parent: nginx
+      allowed_children: [nginx, sh]
+      confidence: 0.99
+      source: auto-discovered
+      observed_count: 45000
+
+    - parent: containerd-shim
+      allowed_children: [pause, nginx, node, java]
+      confidence: 0.99
+      source: auto-discovered
+
+    - parent: node
+      allowed_children: [node, npm, sh, curl]
+      confidence: 0.60
+      source: auto-discovered
+      review_flag: true            # curl seen only 3 times
+      temporal_note: "curl only observed during CI deploys"
+  ```
+- [ ] Confidence scoring logic:
+  - `≥ 100 observations` AND `recurring across multiple time windows` → confidence ≥ 0.95
+  - `10–99 observations` AND `recurring` → confidence 0.70–0.94
+  - `< 10 observations` OR `burst-only` → confidence < 0.70, `review_flag: true`
+- [ ] Write `baseline_report.json` to `data/discovery/`
+- [ ] Write `auto_whitelist.yaml` to `config/` (alongside the manual whitelist)
+- [ ] CLI trigger: `--generate-report` flag or automatic on stability transition
+- [ ] Unit tests:
+  - [ ] High-frequency patterns produce high confidence scores
+  - [ ] Rare/burst patterns are flagged for review
+  - [ ] Generated YAML is valid and parsable by the Stage 3 whitelist loader
+
+### Step 2.5.5 — Agent Mode Router
+
+| Item | Details |
+|---|---|
+| **Action** | Implement the tri-modal agent operation (Discovery / Shadow / Enforcement) with mode-aware event routing in the worker pool |
+| **Deliverable** | Mode router in `cmd/ztre-agent/main.go`, mode configuration in `config/agent_config.yaml` |
+| **Dependency** | Steps 2.5.2, 2.5.4 |
+
+**Tasks:**
+- [ ] Define agent modes:
+  ```go
+  type AgentMode string
+  const (
+      ModeDiscovery   AgentMode = "discovery"    // passive observe, build baseline
+      ModeShadow      AgentMode = "shadow"        // classify + score but don't enforce
+      ModeEnforcement AgentMode = "enforcement"   // full pipeline with containment
+  )
+  ```
+- [ ] Update `config/agent_config.yaml` with mode and discovery settings:
+  ```yaml
+  agent:
+    mode: "discovery"    # discovery | shadow | enforcement
+    discovery:
+      learning_window: 72h
+      snapshot_interval: 1h
+      stability_threshold: 4h
+      auto_generate_whitelist: true
+      output_dir: "data/discovery"
+    shadow:
+      use_whitelist: "config/auto_whitelist.yaml"
+      log_decisions: true
+      enforce: false
+    enforcement:
+      use_whitelist: "config/process_lineage_whitelist.yaml"
+      enforce: true
+  ```
+- [ ] Modify worker loop in `main.go` to route based on mode:
+  ```go
+  for event := range eventBuffer.Events() {
+      switch agentMode {
+      case ModeDiscovery:
+          discoveryEngine.Track(event)
+      case ModeShadow:
+          discoveryEngine.Track(event)  // continue learning
+          classification := validator.Classify(event)
+          if classification != Normal {
+              score := riskEngine.Calculate(event, classification)
+              audit.LogShadow(event, classification, score)
+          }
+      case ModeEnforcement:
+          // full Stage 3+4 pipeline
+      }
+  }
+  ```
+- [ ] Add `--mode` CLI flag with override capability
+- [ ] Log mode transitions and current mode at startup
+- [ ] Add Prometheus label: `ztre_agent_mode` gauge
+- [ ] Unit tests:
+  - [ ] Discovery mode only calls tracker (no validation/scoring)
+  - [ ] Shadow mode calls tracker AND validator but does NOT enforce
+  - [ ] Enforcement mode calls full pipeline
+
+### Step 2.5.6 — Shadow Mode Integration
+
+| Item | Details |
+|---|---|
+| **Action** | Implement shadow mode that runs the full validation and risk scoring pipeline but only logs decisions without enforcing containment — a dry-run validation before going to enforcement |
+| **Deliverable** | Shadow mode logging with "would-have" decision output |
+| **Dependency** | Step 2.5.5, Stage 3 validator (can be implemented in parallel) |
+
+**Tasks:**
+- [ ] In shadow mode, run the same classification and scoring logic as enforcement
+- [ ] Log shadow decisions with clear `[SHADOW]` prefix:
+  ```json
+  {
+    "timestamp": "2026-09-20T14:30:00Z",
+    "mode": "shadow",
+    "pod": "nginx-abc123",
+    "namespace": "frontend",
+    "parent": "nginx",
+    "child": "bash",
+    "classification": "ANOMALOUS",
+    "total_risk_score": 70,
+    "would_have_action": "AUTO_CONTAINMENT",
+    "enforced": false
+  }
+  ```
+- [ ] Add Prometheus counter: `ztre_shadow_decisions_total{action}` — tracks what would have happened
+- [ ] Generate shadow mode summary report: false positive rate estimate, containment rate, alert rate
+- [ ] Compare shadow decisions against known-good/known-bad test scenarios to validate whitelist quality before going to enforcement
+- [ ] Unit tests:
+  - [ ] Shadow mode produces decision logs but does NOT patch pods
+  - [ ] Shadow metrics increment correctly
+
+### Step 2.5.7 — Discovery Integration Testing
+
+| Item | Details |
+|---|---|
+| **Action** | End-to-end integration test: deploy agent in discovery mode on the live cluster, observe real workloads, validate baseline generation |
+| **Deliverable** | Verified discovery pipeline producing accurate baseline from live Tetragon events |
+| **Dependency** | All Step 2.5.x |
+
+**Tasks:**
+- [ ] Deploy ZTRE agent in `discovery` mode to the cluster
+- [ ] Run normal workload activity in `ztre-test` namespace for ≥ 1 hour
+- [ ] Verify `BehaviorTracker` accumulates correct pattern counts
+- [ ] Verify baseline snapshots are persisted to disk
+- [ ] Trigger `--generate-report` and verify:
+  - [ ] `baseline_report.json` contains all observed lineage pairs
+  - [ ] `auto_whitelist.yaml` is valid YAML matching the whitelist schema
+  - [ ] High-frequency patterns (e.g., `containerd-shim → pause`) have high confidence
+  - [ ] Known-rare patterns are flagged for review
+- [ ] Switch to `shadow` mode with the auto-generated whitelist
+- [ ] Inject a known attack (e.g., `nginx → bash`) and verify shadow log shows `would_have_action: AUTO_CONTAINMENT`
+- [ ] Verify normal operations show `NORMAL` classification (no false positives)
+- [ ] Run `go test -race ./pkg/discovery/...` — zero race conditions
+
+---
+
+### 🚪 Stage 2.5 Gate
+
+| Criteria | Verified |
+|---|---|
+| BehaviorTracker accumulates execution patterns with correct frequency counts | ☐ |
+| BaselineStore persists snapshots and resumes on restart | ☐ |
+| Stability detection correctly identifies when baseline has converged | ☐ |
+| Auto-generated whitelist matches observed patterns with appropriate confidence scores | ☐ |
+| Low-confidence / rare patterns are flagged for operator review | ☐ |
+| Agent mode router correctly routes events based on discovery / shadow / enforcement mode | ☐ |
+| Shadow mode logs "would-have" decisions without enforcing | ☐ |
+| Discovery overhead < 1μs per event (does not degrade pipeline throughput) | ☐ |
+| Integration test on live cluster produces valid baseline report | ☐ |
+
+---
+
+## Stage 3 — Validation & Risk Scoring (FR-02, FR-03)
+
+> **Goal:** Build the process lineage validator and the multidimensional risk scoring engine, operating on the empirically-generated whitelist from Stage 2.5.
+
+**Duration:** Weeks 7–8
 **PRD References:** FR-02, FR-03
+**Dependency:** Stage 2.5 (auto-generated whitelist provides the data foundation)
+
+> **Note:** The whitelist used by the validator is now data-driven. The auto-generated `auto_whitelist.yaml` from Stage 2.5 serves as the primary input. The manually-curated `process_lineage_whitelist.yaml` can override or supplement it. Both are hot-reloadable.
 
 ### Step 3.1 — Process Lineage Whitelist Loader
 
@@ -402,7 +731,7 @@ Foundation  ──►  Event        ──►  Validation  ──►  Decision &
 
 > **Goal:** Build the decision engine that maps risk scores to tiered actions, and the containment executor that patches Kubernetes pod labels to trigger Cilium network isolation.
 
-**Duration:** Weeks 7–8
+**Duration:** Weeks 9–10
 **PRD References:** FR-04, FR-05, NFR-01 (Non-Destructive), NFR-02 (Zero-Downtime)
 
 ### Step 4.1 — Decision Engine with Tiered Response
@@ -515,7 +844,7 @@ Foundation  ──►  Event        ──►  Validation  ──►  Decision &
 
 > **Goal:** Deploy the complete ZTRE agent into the Kubernetes cluster, simulate real attack scenarios from the MITRE ATT&CK framework, and validate all success metrics (M1–M5).
 
-**Duration:** Weeks 9–10
+**Duration:** Weeks 11–12
 **PRD References:** §8 Success Metrics, MITRE ATT&CK alignment
 
 ### Step 5.1 — Agent Deployment as DaemonSet
@@ -642,7 +971,7 @@ Foundation  ──►  Event        ──►  Validation  ──►  Decision &
 
 > **Goal:** Production-harden the agent, finalize documentation, and prepare for v1.0.0 release.
 
-**Duration:** Weeks 11–12
+**Duration:** Weeks 13–14
 **PRD References:** NFR-01 through NFR-06
 
 ### Step 6.1 — Security Hardening
@@ -724,16 +1053,18 @@ Foundation  ──►  Event        ──►  Validation  ──►  Decision &
 | PRD Requirement | Stage | Steps |
 |---|---|---|
 | FR-01 (Event Interception) | Stage 2 | 2.1, 2.2, 2.3, 2.4 |
-| FR-02 (Process Lineage Validation) | Stage 3 | 3.1, 3.2 |
+| FR-02 (Process Lineage Validation — Data Foundation) | Stage 2.5 | 2.5.1–2.5.7 |
+| FR-02 (Process Lineage Validation — Engine) | Stage 3 | 3.1, 3.2 |
 | FR-03 (Risk Assessment) | Stage 3 | 3.3, 3.4 |
 | FR-04 (Decision Engine) | Stage 4 | 4.1, 4.2 |
 | FR-05 (Automated Containment) | Stage 4 | 4.3, 4.4 |
 | NFR-01 (Non-Destructive Mitigation) | Stage 4 | 4.3 (safety check) |
 | NFR-02 (Zero-Downtime) | Stage 5 | 5.3, 5.5 |
-| NFR-03 (Performance) | Stage 2, 5 | 2.3 (throughput), 5.4 (M5) |
+| NFR-03 (Performance) | Stage 2, 2.5, 5 | 2.3 (throughput), 2.5.2 (tracker overhead), 5.4 (M5) |
 | NFR-04 (Security) | Stage 1, 6 | 1.5, 6.1 |
-| NFR-05 (Reliability) | Stage 2, 6 | 2.1 (reconnect), 6.2 |
-| NFR-06 (Observability) | Stage 2, 6 | 2.4, 6.3 |
+| NFR-05 (Reliability) | Stage 2, 2.5, 6 | 2.1 (reconnect), 2.5.3 (baseline persistence), 6.2 |
+| NFR-06 (Observability) | Stage 2, 2.5, 6 | 2.4, 2.5.2 (discovery metrics), 6.3 |
+| O1 (Context-Aware Threat Validation) | Stage 2.5 | 2.5.2–2.5.4 (empirical context from observed behavior) |
 | M1–M5 (Success Metrics) | Stage 5 | 5.3, 5.4 |
 
 ## Appendix B — Technology Stack Summary

@@ -1,6 +1,6 @@
 # ZTRE
 
-ZTRE (Zero Trust Runtime Enforcement) is an intelligent runtime security framework designed to enhance cloud-native threat detection and response workflows.
+ZTRE (Zero Trust Response Engine) is an intelligent runtime security framework designed to enhance cloud-native threat detection and response workflows.
 
 Rather than replacing existing runtime security tools, ZTRE complements Tetragon by providing:
 
