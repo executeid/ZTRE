@@ -7,3 +7,4 @@
 /data/discovery/*.json
 /data/discovery/*.yaml
 !/data/discovery/.gitkeep
+/doc
