@@ -26,15 +26,15 @@ spec:
                 operator: DoesNotExist
       containers:
       - name: ztre-agent
-        image: ztre-agent:v0.1.0
+        image: ztre-agent:v0.2.0
         imagePullPolicy: Never  # Image loaded locally via ctr import
         securityContext:
           runAsUser: 0
           runAsGroup: 0
         args:
+        - "-config=/etc/ztre/agent_config.yaml"
         - "-tetragon-socket=/var/run/tetragon/tetragon.sock"
         - "-metrics-addr=:9090"
-        - "-buffer-size=50000"
         - "-debug"
         ports:
         - name: metrics
@@ -63,8 +63,20 @@ spec:
         - name: tetragon-sock
           mountPath: /var/run/tetragon/tetragon.sock
           readOnly: true
+        - name: config-volume
+          mountPath: /etc/ztre
+          readOnly: true
+        - name: discovery-data
+          mountPath: /data/discovery
       volumes:
       - name: tetragon-sock
         hostPath:
           path: /var/run/tetragon/tetragon.sock
           type: Socket
+      - name: config-volume
+        configMap:
+          name: ztre-config
+      - name: discovery-data
+        hostPath:
+          path: /var/lib/ztre/discovery
+          type: DirectoryOrCreate
