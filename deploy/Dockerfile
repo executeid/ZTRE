@@ -18,6 +18,7 @@ FROM gcr.io/distroless/static:nonroot
 
 WORKDIR /
 COPY --from=builder /ztre-agent /ztre-agent
+COPY config/ /config/
 
 USER 65532:65532
 

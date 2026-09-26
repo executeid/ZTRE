@@ -13,22 +13,29 @@ import (
 
 	"github.com/executeid/ztre/pkg/collector"
 	"github.com/executeid/ztre/pkg/config"
+	"github.com/executeid/ztre/pkg/containment"
+	"github.com/executeid/ztre/pkg/decision"
 	"github.com/executeid/ztre/pkg/discovery"
 	"github.com/executeid/ztre/pkg/observability"
+	"github.com/executeid/ztre/pkg/risk"
+	"github.com/executeid/ztre/pkg/validator"
 	"go.uber.org/zap"
 )
 
 func main() {
 	var (
-		socketPath    string
-		metricsAddr   string
-		bufferSize    int
-		workerCount   int
-		configPath    string
-		mode          string
-		genReport     bool
-		debug         bool
-		whitelistPath string
+		socketPath     string
+		metricsAddr    string
+		bufferSize     int
+		workerCount    int
+		configPath     string
+		mode           string
+		genReport      bool
+		debug          bool
+		whitelistPath  string
+		riskPolicyPath string
+		manualWlPath   string
+		webhookURL     string
 	)
 
 	flag.StringVar(&socketPath, "tetragon-socket", "/var/run/tetragon/tetragon.sock", "Path to Tetragon gRPC unix domain socket")
@@ -36,7 +43,10 @@ func main() {
 	flag.IntVar(&bufferSize, "buffer-size", 50000, "In-memory event buffer capacity")
 	flag.IntVar(&workerCount, "workers", 0, "Number of consumer worker goroutines (default: from config or 4)")
 	flag.StringVar(&configPath, "config", "config/agent_config.yaml", "Path to agent config YAML")
-	flag.StringVar(&whitelistPath, "whitelist-path", "", "Path to process lineage whitelist YAML")
+	flag.StringVar(&whitelistPath, "whitelist-path", "", "Path to auto-generated whitelist YAML")
+	flag.StringVar(&manualWlPath, "manual-whitelist", "config/process_lineage_whitelist.yaml", "Path to manual whitelist overrides")
+	flag.StringVar(&riskPolicyPath, "risk-policy", "config/risk_scoring_policy.yaml", "Path to risk scoring policy YAML")
+	flag.StringVar(&webhookURL, "webhook-url", "", "Optional HTTP webhook endpoint for security alerts")
 	flag.StringVar(&mode, "mode", "", "Agent mode override: discovery|shadow|enforcement")
 	flag.BoolVar(&genReport, "generate-report", false, "Generate baseline report and whitelist, then exit")
 	flag.BoolVar(&debug, "debug", false, "Enable debug logging")
@@ -138,7 +148,7 @@ func main() {
 	}
 
 	logger.Info("starting ZTRE Agent",
-		zap.String("version", "v0.2.0"),
+		zap.String("version", "v0.4.0"),
 		zap.String("mode", string(agentMode)),
 		zap.String("tetragon_socket", socketPath),
 		zap.String("metrics_addr", metricsAddr),
@@ -146,7 +156,69 @@ func main() {
 		zap.Int("workers", workerCount),
 	)
 
-	// 3. Initialize Discovery Engine
+	// 3. Initialize Stage 3 & Stage 4 Engines
+	var (
+		whitelist           *validator.Whitelist
+		riskEngine          *risk.Engine
+		decisionEngine      *decision.Engine
+		alertDispatcher     *decision.Dispatcher
+		containmentExecutor *containment.Executor
+	)
+
+	thresholds := decision.ThresholdConfig{
+		GreenMax:  cfg.DecisionEngine.Thresholds.GreenMax,
+		YellowMax: cfg.DecisionEngine.Thresholds.YellowMax,
+	}
+	if thresholds.GreenMax == 0 && thresholds.YellowMax == 0 {
+		thresholds = decision.DefaultThresholds()
+	}
+	decisionEngine = decision.NewEngine(thresholds, logger)
+
+	// Setup Alert Dispatcher
+	alertDispatcher = decision.NewDispatcher(logger, decision.NewStdoutAlertSink(logger))
+	if webhookURL != "" {
+		alertDispatcher.RegisterSink(decision.NewWebhookAlertSink(webhookURL, 5*time.Second, nil))
+	}
+
+	if agentMode == discovery.ModeShadow || agentMode == discovery.ModeEnforcement {
+		var wlErr error
+		whitelist, wlErr = validator.NewWhitelist(whitelistPath, logger)
+		if wlErr != nil {
+			logger.Error("failed to load whitelist", zap.Error(wlErr))
+			os.Exit(1)
+		}
+		// Merge manual overrides on top
+		if err := whitelist.LoadMulti(manualWlPath); err != nil {
+			logger.Warn("could not load manual whitelist overrides", zap.Error(err))
+		}
+
+		var riskErr error
+		riskEngine, riskErr = risk.NewEngine(riskPolicyPath, logger)
+		if riskErr != nil {
+			logger.Error("failed to load risk policy", zap.Error(riskErr))
+			os.Exit(1)
+		}
+
+		// In enforcement mode, initialize Kubernetes containment executor
+		if agentMode == discovery.ModeEnforcement {
+			var contErr error
+			containmentExecutor, contErr = containment.NewInClusterExecutor(logger)
+			if contErr != nil {
+				logger.Error("failed to initialize containment executor", zap.Error(contErr))
+				os.Exit(1)
+			}
+		}
+
+		logger.Info("Stage 3 & 4 modules initialized",
+			zap.String("whitelist", whitelistPath),
+			zap.String("risk_policy", riskPolicyPath),
+			zap.Int("green_max", thresholds.GreenMax),
+			zap.Int("yellow_max", thresholds.YellowMax),
+			zap.Bool("containment_active", containmentExecutor != nil),
+		)
+	}
+
+	// 4. Initialize Discovery Engine
 	tracker := discovery.NewBehaviorTracker(logger)
 	store := discovery.NewBaselineStore(
 		tracker,
@@ -184,7 +256,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 4. Setup Signal Handling for Graceful Shutdown and Hot Reloading
+	// 5. Setup Signal Handling for Graceful Shutdown and Hot Reloading
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
@@ -206,6 +278,12 @@ func main() {
 						zap.String("mode", reloadedCfg.Agent.Mode),
 						zap.String("output_dir", reloadedCfg.Agent.Discovery.OutputDir),
 					)
+					if reloadedCfg.DecisionEngine.Thresholds.GreenMax > 0 && reloadedCfg.DecisionEngine.Thresholds.YellowMax > 0 {
+						decisionEngine.UpdateThresholds(decision.ThresholdConfig{
+							GreenMax:  reloadedCfg.DecisionEngine.Thresholds.GreenMax,
+							YellowMax: reloadedCfg.DecisionEngine.Thresholds.YellowMax,
+						})
+					}
 				}
 
 				targetWlPath := whitelistPath
@@ -229,14 +307,14 @@ func main() {
 		}
 	}()
 
-	// 5. Start Metrics & Health Server (/metrics & /healthz)
+	// 6. Start Metrics & Health Server (/metrics & /healthz)
 	metricsServer := observability.StartMetricsServer(ctx, metricsAddr, logger)
 
-	// 6. Initialize Event Buffer
+	// 7. Initialize Event Buffer
 	eventBuffer := collector.NewEventBuffer(bufferSize, logger)
 	defer eventBuffer.Close()
 
-	// 7. Start baseline snapshot loop (discovery + shadow modes).
+	// 8. Start baseline snapshot loop (discovery + shadow modes).
 	var storeWg sync.WaitGroup
 	if agentMode == discovery.ModeDiscovery || agentMode == discovery.ModeShadow {
 		storeWg.Add(1)
@@ -246,7 +324,7 @@ func main() {
 		}()
 	}
 
-	// 8. Start Consumer Worker Pool with mode-aware routing.
+	// 9. Start Consumer Worker Pool with mode-aware routing.
 	var wg sync.WaitGroup
 	for i := 0; i < workerCount; i++ {
 		workerID := i
@@ -261,32 +339,103 @@ func main() {
 					observability.DiscoveryEventsTotal.Inc()
 
 				case discovery.ModeShadow:
-					// Continue learning + dry-run classification.
+					// Continue learning + dry-run classification & scoring.
 					tracker.Track(event)
 					observability.DiscoveryEventsTotal.Inc()
 
-					// Stage 3 shadow classification will be wired here.
-					// For now, log what we'd do (placeholder for validator).
-					logger.Debug("shadow mode event",
-						zap.Int("worker", workerID),
-						zap.String("type", string(event.EventType)),
-						zap.String("namespace", event.Namespace),
+					if event.EventType != collector.EventTypeExecve {
+						break
+					}
+					class := whitelist.Classify(event.ParentBinary, event.Binary)
+					observability.EventsClassifiedTotal.WithLabelValues(string(class)).Inc()
+					if class == validator.ClassNormal {
+						break
+					}
+					score := riskEngine.Calculate(event, class)
+					observability.RiskScoreHistogram.Observe(score.TotalScore)
+					action := decisionEngine.EvaluateRiskScore(score)
+					zone := score.Zone(
+						decisionEngine.Thresholds().GreenMax,
+						decisionEngine.Thresholds().YellowMax,
+					)
+					observability.ShadowDecisionsTotal.WithLabelValues(string(action)).Inc()
+					logger.Info("[SHADOW] classification result",
+						zap.String("mode", "shadow"),
 						zap.String("pod", event.PodName),
-						zap.String("binary", event.Binary),
-						zap.String("parent_binary", event.ParentBinary),
+						zap.String("namespace", event.Namespace),
+						zap.String("parent", event.ParentBinary),
+						zap.String("child", event.Binary),
+						zap.String("classification", string(class)),
+						zap.Float64("severity_score", score.SeverityScore),
+						zap.Float64("context_score", score.ContextScore),
+						zap.Float64("asset_score", score.AssetScore),
+						zap.Float64("total_risk_score", score.TotalScore),
+						zap.String("zone", zone),
+						zap.String("would_have_action", string(action)),
+						zap.Bool("enforced", false),
 					)
 
 				case discovery.ModeEnforcement:
-					// Full pipeline — Stage 3+4 will be wired here.
-					logger.Debug("enforcement mode event",
-						zap.Int("worker", workerID),
-						zap.String("type", string(event.EventType)),
-						zap.String("namespace", event.Namespace),
-						zap.String("pod", event.PodName),
-						zap.String("binary", event.Binary),
-						zap.Uint32("pid", event.PID),
-						zap.String("parent_binary", event.ParentBinary),
+					// Full Stage 3 + 4 pipeline: classify → score → decide → contain/alert.
+					if event.EventType != collector.EventTypeExecve {
+						break
+					}
+					class := whitelist.Classify(event.ParentBinary, event.Binary)
+					observability.EventsClassifiedTotal.WithLabelValues(string(class)).Inc()
+					if class == validator.ClassNormal {
+						logger.Debug("event classified NORMAL",
+							zap.String("parent", event.ParentBinary),
+							zap.String("child", event.Binary),
+						)
+						break
+					}
+					score := riskEngine.Calculate(event, class)
+					observability.RiskScoreHistogram.Observe(score.TotalScore)
+					action := decisionEngine.EvaluateRiskScore(score)
+
+					alert := decision.NewAlert(
+						fmt.Sprintf("%s-%d", event.PodName, event.PID),
+						event.Namespace,
+						event.PodName,
+						event.ParentBinary,
+						event.Binary,
+						event.Arguments,
+						class,
+						score,
+						action,
 					)
+
+					switch action {
+					case decision.ActionAllowAndLog:
+						logger.Info("event permitted under threshold",
+							zap.String("pod", event.PodName),
+							zap.String("namespace", event.Namespace),
+							zap.Float64("total_risk_score", score.TotalScore),
+						)
+
+					case decision.ActionLogAndAlert:
+						alertDispatcher.Dispatch(ctx, alert)
+
+					case decision.ActionAutoContainment:
+						// 1. Dispatch critical containment alert
+						alertDispatcher.Dispatch(ctx, alert)
+
+						// 2. Execute automated network isolation via Cilium label patching
+						if containmentExecutor != nil {
+							if err := containmentExecutor.Quarantine(ctx, event.Namespace, event.PodName, score.TotalScore); err != nil {
+								logger.Error("failed to execute automated containment",
+									zap.String("namespace", event.Namespace),
+									zap.String("pod", event.PodName),
+									zap.Error(err),
+								)
+							}
+						} else {
+							logger.Warn("containment executor not initialized, skipping pod patch",
+								zap.String("namespace", event.Namespace),
+								zap.String("pod", event.PodName),
+							)
+						}
+					}
 
 				default:
 					// Fallback: log like Stage 2 behavior.
@@ -304,7 +453,7 @@ func main() {
 		}()
 	}
 
-	// 9. Start Tetragon Collector Client
+	// 10. Start Tetragon Collector Client
 	clientConfig := collector.ClientConfig{
 		SocketPath:          socketPath,
 		ReconnectInterval:   1 * time.Second,

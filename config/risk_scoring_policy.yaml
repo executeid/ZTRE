@@ -1,40 +1,50 @@
+# Risk Scoring Policy — ZTRE Stage 3
+#
+# Formula: Risk = ws*S + wc*C + wa*A
+# Score range: 0–100 (max: 0.5*100 + 0.3*100 + 0.2*100 = 100)
+# Thresholds: Green < 40, Yellow 40–69, Red >= 70
+
 weights:
   severity: 0.50
   context: 0.30
   asset_criticality: 0.20
 
+# Severity scores rescaled to 0–100 range
 severity_scores:
-  reverse_shell: 50
-  chmod_suid: 45
-  curl_download: 40
-  bash_spawn: 35
-  file_write_etc: 30
-  default: 10
+  reverse_shell: 100
+  chmod_suid: 90
+  curl_download: 80
+  bash_spawn: 70
+  file_write_etc: 60
+  nmap_scan: 85
+  default: 20
 
+# Context scores rescaled to 0–100 range
 context_scores:
   NORMAL: 0
-  SUSPICIOUS: 15
-  ANOMALOUS: 30
+  SUSPICIOUS: 50
+  ANOMALOUS: 100
 
+# Asset criticality rescaled to 0–100 range
 asset_criticality:
   critical:
     namespaces:
       - database
       - secrets
       - auth
-    score: 20
+    score: 100
   high:
     namespaces:
       - api
       - messaging
-    score: 15
+    score: 75
   medium:
     namespaces:
       - backend
-    score: 10
+    score: 50
   low:
     namespaces:
       - frontend
       - static
-    score: 5
-  default_score: 10
+    score: 25
+  default_score: 50

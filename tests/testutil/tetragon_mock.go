@@ -115,8 +115,8 @@ func (m *TetragonMockServer) NewClientConn(ctx context.Context) (*grpc.ClientCon
 	)
 }
 
-// NewTetragonExecResponse builds a GetEventsResponse containing a ProcessExec event.
-func NewTetragonExecResponse(parentBinary, childBinary, namespace, workload, node string) *tetragon.GetEventsResponse {
+// NewTetragonExecResponseWithArgs builds a GetEventsResponse containing a ProcessExec event with custom arguments.
+func NewTetragonExecResponseWithArgs(parentBinary, childBinary, args, namespace, workload, node string) *tetragon.GetEventsResponse {
 	return &tetragon.GetEventsResponse{
 		NodeName: node,
 		Time:     timestamppb.New(time.Now().UTC()),
@@ -125,7 +125,7 @@ func NewTetragonExecResponse(parentBinary, childBinary, namespace, workload, nod
 				Process: &tetragon.Process{
 					Pid:       wrapperspb.UInt32(1234),
 					Binary:    childBinary,
-					Arguments: "-c run",
+					Arguments: args,
 					Pod: &tetragon.Pod{
 						Namespace:    namespace,
 						Name:         workload + "-pod-xyz",
@@ -143,6 +143,11 @@ func NewTetragonExecResponse(parentBinary, childBinary, namespace, workload, nod
 			},
 		},
 	}
+}
+
+// NewTetragonExecResponse builds a GetEventsResponse containing a ProcessExec event.
+func NewTetragonExecResponse(parentBinary, childBinary, namespace, workload, node string) *tetragon.GetEventsResponse {
+	return NewTetragonExecResponseWithArgs(parentBinary, childBinary, "-c run", namespace, workload, node)
 }
 
 // NewTetragonExitResponse builds a GetEventsResponse containing a ProcessExit event.

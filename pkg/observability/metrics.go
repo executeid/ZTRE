@@ -88,6 +88,56 @@ var (
 		},
 		[]string{"action"},
 	)
+
+	// Stage 3 — Validation & Risk metrics
+	EventsClassifiedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "ztre",
+			Subsystem: "validator",
+			Name:      "events_classified_total",
+			Help:      "Total events classified by lineage validation.",
+		},
+		[]string{"classification"},
+	)
+
+	RiskScoreHistogram = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Namespace: "ztre",
+			Subsystem: "risk",
+			Name:      "score_distribution",
+			Help:      "Distribution of computed risk scores.",
+			Buckets:   []float64{10, 20, 30, 40, 50, 60, 70, 80, 90, 100},
+		},
+	)
+
+	// Stage 4 — Decision & Containment metrics
+	ContainmentActionsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: "ztre",
+			Subsystem: "containment",
+			Name:      "actions_total",
+			Help:      "Total number of automated network containment actions executed.",
+		},
+	)
+
+	ApiErrorsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: "ztre",
+			Subsystem: "containment",
+			Name:      "api_errors_total",
+			Help:      "Total number of Kubernetes API errors encountered during containment.",
+		},
+	)
+
+	AlertsDispatchedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "ztre",
+			Subsystem: "decision",
+			Name:      "alerts_dispatched_total",
+			Help:      "Total security alerts emitted by sink type.",
+		},
+		[]string{"sink"},
+	)
 )
 
 func init() {
@@ -106,6 +156,11 @@ func RegisterMetrics() {
 		DiscoveryStabilityGauge,
 		AgentModeGauge,
 		ShadowDecisionsTotal,
+		EventsClassifiedTotal,
+		RiskScoreHistogram,
+		ContainmentActionsTotal,
+		ApiErrorsTotal,
+		AlertsDispatchedTotal,
 	)
 }
 

@@ -18,7 +18,7 @@ data:
       buffer_size: 50000
 
     agent:
-      mode: "discovery"    # discovery | shadow | enforcement
+      mode: "enforcement"    # discovery | shadow | enforcement
       worker_count: 4
       discovery:
         learning_window: 72h
@@ -34,3 +34,69 @@ data:
         green_max: 39   # < 40 -> ALLOW_AND_LOG
         yellow_max: 69  # 40-69 -> LOG_AND_ALERT
         # >= 70 -> AUTO_CONTAINMENT
+
+  process_lineage_whitelist.yaml: |
+    whitelisted_lineages:
+      - parent: nginx
+        allowed_children:
+          - nginx
+          - sh
+      - parent: java
+        allowed_children:
+          - java
+      - parent: postgres
+        allowed_children:
+          - postgres
+          - pg_dump
+      - parent: node
+        allowed_children:
+          - node
+          - npm
+      - parent: containerd-shim-runc-v2
+        allowed_children:
+          - sh
+          - ztre-agent
+
+  risk_scoring_policy.yaml: |
+    weights:
+      severity: 0.50
+      context: 0.30
+      asset_criticality: 0.20
+
+    severity_scores:
+      reverse_shell: 100
+      chmod_suid: 90
+      curl_download: 80
+      bash_spawn: 70
+      file_write_etc: 60
+      nmap_scan: 85
+      default: 20
+
+    context_scores:
+      NORMAL: 0
+      SUSPICIOUS: 50
+      ANOMALOUS: 100
+
+    asset_criticality:
+      critical:
+        namespaces:
+          - database
+          - secrets
+          - auth
+        score: 100
+      high:
+        namespaces:
+          - api
+          - messaging
+        score: 75
+      medium:
+        namespaces:
+          - backend
+        score: 50
+      low:
+        namespaces:
+          - frontend
+          - static
+          - ztre-test
+        score: 25
+      default_score: 50

@@ -26,13 +26,16 @@ spec:
                 operator: DoesNotExist
       containers:
       - name: ztre-agent
-        image: ztre-agent:v0.2.0
+        image: ztre-agent:v0.4.0
         imagePullPolicy: Never  # Image loaded locally via ctr import
         securityContext:
           runAsUser: 0
           runAsGroup: 0
         args:
         - "-config=/etc/ztre/agent_config.yaml"
+        - "-manual-whitelist=/etc/ztre/process_lineage_whitelist.yaml"
+        - "-risk-policy=/etc/ztre/risk_scoring_policy.yaml"
+        - "-whitelist-path=/data/discovery/auto_whitelist.yaml"
         - "-tetragon-socket=/var/run/tetragon/tetragon.sock"
         - "-metrics-addr=:9090"
         - "-debug"
