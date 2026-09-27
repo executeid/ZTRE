@@ -14,3 +14,12 @@ whitelisted_lineages:
     allowed_children:
       - node
       - npm
+  - parent: containerd-shim-runc-v2
+    allowed_children:
+      - sh
+      - ztre-agent
+      - nginx
+      - postgres
+  - parent: runc
+    allowed_children:
+      - sh
