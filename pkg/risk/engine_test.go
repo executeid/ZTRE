@@ -209,15 +209,16 @@ func TestEngine_NmapScan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// nmap is not explicitly matched by binary checks but by policy key
-	// Since it doesn't match any check, it gets "default" = 20
-	// This test documents that behavior; explicit nmap detection needs
-	// adding the binary check if required.
 	ev := makeEvent("nmap", "-sV 10.0.0.0/24", "database", collector.EventTypeExecve)
 	score := engine.Calculate(ev, validator.ClassAnomalous)
 
-	t.Logf("nmap score: S=%.1f Total=%.1f", score.SeverityScore, score.TotalScore)
-	// ponytail: add explicit nmap binary check when lateral movement detection needed
+	if score.SeverityScore != 85 {
+		t.Fatalf("expected severity 85 for nmap, got %.1f", score.SeverityScore)
+	}
+	// nmap + ANOMALOUS + database(critical): 0.5*85 + 0.3*100 + 0.2*100 = 42.5+30+20 = 92.5
+	if score.TotalScore < 92 || score.TotalScore > 93 {
+		t.Errorf("expected ~92.5 total, got %.1f", score.TotalScore)
+	}
 }
 
 func TestEngine_MaxScore(t *testing.T) {
@@ -282,20 +283,20 @@ func TestEngine_ReverseShell_NoFalsePositive(t *testing.T) {
 }
 
 // TestEngine_Zone_FractionalScore verifies Zone() and decision.Evaluate() boundaries
-// are consistent for fractional scores. Both use <= greenMax / <= yellowMax semantics.
+// are consistent for fractional scores. Both use < (max+1) semantics per PRD.
 func TestEngine_Zone_FractionalScores(t *testing.T) {
 	tests := []struct {
 		score    float64
 		wantZone string
 	}{
 		{38.0, "GREEN"},
-		{39.0, "GREEN"},  // exactly at boundary: <= 39 -> GREEN
-		{39.5, "YELLOW"}, // 39.5 > 39.0 -> YELLOW (consistent with decision.Evaluate)
-		{39.9, "YELLOW"},
-		{40.0, "YELLOW"},
-		{69.0, "YELLOW"}, // exactly at boundary: <= 69 -> YELLOW
-		{69.5, "RED"},    // 69.5 > 69.0 -> RED (consistent with decision.Evaluate)
-		{70.0, "RED"},
+		{39.0, "GREEN"},  // exactly at boundary: < 40 -> GREEN
+		{39.5, "GREEN"},  // 39.5 < 40 -> GREEN (PRD: Green < 40)
+		{39.9, "GREEN"},
+		{40.0, "YELLOW"}, // exactly 40 -> YELLOW
+		{69.0, "YELLOW"}, // 69 < 70 -> YELLOW
+		{69.5, "YELLOW"}, // 69.5 < 70 -> YELLOW (PRD: Yellow 40-69)
+		{70.0, "RED"},    // exactly 70 -> RED
 	}
 	for _, tc := range tests {
 		rs := RiskScore{TotalScore: tc.score}

@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "ztre.fullname" . }}
+  namespace: ztre-system
+  labels:
+    {{- include "ztre.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "ztre.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ztre.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "ztre.fullname" . }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: DoesNotExist
+      containers:
+      - name: ztre-agent
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        securityContext:
+          runAsUser: 0
+          runAsGroup: 0
+        args:
+        - "-config=/etc/ztre/agent_config.yaml"
+        - "-manual-whitelist=/etc/ztre/process_lineage_whitelist.yaml"
+        - "-risk-policy=/etc/ztre/risk_scoring_policy.yaml"
+        - "-whitelist-path=/data/discovery/auto_whitelist.yaml"
+        - "-tetragon-socket={{ .Values.tetragon.socketPath }}"
+        - "-metrics-addr=:{{ .Values.metrics.port }}"
+        - "-debug"
+        ports:
+        - name: metrics
+          containerPort: {{ .Values.metrics.port }}
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: metrics
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: metrics
+          initialDelaySeconds: 3
+          periodSeconds: 5
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+        volumeMounts:
+        - name: tetragon-sock
+          mountPath: {{ .Values.tetragon.socketPath }}
+          readOnly: true
+        - name: config-volume
+          mountPath: /etc/ztre
+          readOnly: true
+        - name: discovery-data
+          mountPath: /data/discovery
+      volumes:
+      - name: tetragon-sock
+        hostPath:
+          path: {{ .Values.tetragon.socketPath }}
+          type: Socket
+      - name: config-volume
+        configMap:
+          name: {{ include "ztre.fullname" . }}-config
+      - name: discovery-data
+        hostPath:
+          path: /var/lib/ztre/discovery
+          type: DirectoryOrCreate

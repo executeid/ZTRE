@@ -2,6 +2,7 @@ package risk
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,12 +22,12 @@ type RiskScore struct {
 }
 
 // Zone returns the tiered response zone for this score.
-// Boundaries match decision.Engine.Evaluate(): Green <= greenMax, Yellow <= yellowMax, Red > yellowMax.
+// Boundaries match decision.Engine.Evaluate(): Green < greenMax+1, Yellow < yellowMax+1, Red >= yellowMax+1.
 func (r RiskScore) Zone(greenMax, yellowMax int) string {
 	switch {
-	case r.TotalScore <= float64(greenMax):
+	case r.TotalScore < float64(greenMax+1):
 		return "GREEN"
-	case r.TotalScore <= float64(yellowMax):
+	case r.TotalScore < float64(yellowMax+1):
 		return "YELLOW"
 	default:
 		return "RED"
@@ -43,15 +44,16 @@ type PolicyConfig struct {
 	SeverityScores map[string]float64 `yaml:"severity_scores"`
 	ContextScores  map[string]float64 `yaml:"context_scores"`
 	AssetCriticality struct {
-		Critical     assetTier `yaml:"critical"`
-		High         assetTier `yaml:"high"`
-		Medium       assetTier `yaml:"medium"`
-		Low          assetTier `yaml:"low"`
+		Critical     AssetTier `yaml:"critical"`
+		High         AssetTier `yaml:"high"`
+		Medium       AssetTier `yaml:"medium"`
+		Low          AssetTier `yaml:"low"`
 		DefaultScore float64   `yaml:"default_score"`
 	} `yaml:"asset_criticality"`
 }
 
-type assetTier struct {
+// AssetTier defines a criticality tier with its associated namespaces and score.
+type AssetTier struct {
 	Namespaces []string `yaml:"namespaces"`
 	Score      float64  `yaml:"score"`
 }
@@ -73,16 +75,30 @@ func NewEngine(policyPath string, logger *zap.Logger) (*Engine, error) {
 	if err := yaml.Unmarshal(data, &policy); err != nil {
 		return nil, fmt.Errorf("parse risk policy: %w", err)
 	}
+	if err := validateWeights(policy); err != nil {
+		return nil, err
+	}
 	e := &Engine{policy: policy, logger: logger}
 	e.buildNamespaceCache()
 	return e, nil
 }
 
 // NewEngineFromPolicy creates a risk engine from an in-memory policy.
-func NewEngineFromPolicy(policy PolicyConfig, logger *zap.Logger) *Engine {
+func NewEngineFromPolicy(policy PolicyConfig, logger *zap.Logger) (*Engine, error) {
+	if err := validateWeights(policy); err != nil {
+		return nil, err
+	}
 	e := &Engine{policy: policy, logger: logger}
 	e.buildNamespaceCache()
-	return e
+	return e, nil
+}
+
+func validateWeights(p PolicyConfig) error {
+	sum := p.Weights.Severity + p.Weights.Context + p.Weights.AssetCriticality
+	if math.Abs(sum-1.0) > 0.001 {
+		return fmt.Errorf("policy weights must sum to 1.0, got %f", sum)
+	}
+	return nil
 }
 
 func (e *Engine) buildNamespaceCache() {
@@ -141,6 +157,7 @@ func (e *Engine) severityScore(event *collector.SecurityEvent) float64 {
 		{"chmod_suid", func() bool { return strings.Contains(bin, "chmod") && strings.Contains(args, "+s") }},
 		{"curl_download", func() bool { return strings.Contains(bin, "curl") || strings.Contains(bin, "wget") }},
 		{"bash_spawn", func() bool { return isSuspiciousShell(bin) }},
+		{"nmap_scan", func() bool { return strings.Contains(bin, "nmap") }},
 		{"file_write_etc", func() bool {
 			return (event.EventType == collector.EventTypeKprobe || event.EventType == collector.EventTypeFileAccess) &&
 				strings.Contains(args, "/etc/")

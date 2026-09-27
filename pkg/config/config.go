@@ -18,10 +18,12 @@ type AgentConfig struct {
 	} `yaml:"agent"`
 	Server struct {
 		MetricsPort int `yaml:"metrics_port"`
+		HealthPort  int `yaml:"health_port"`
 	} `yaml:"server"`
 	Tetragon struct {
-		SocketPath   string `yaml:"socket_path"`
-		BufferSize   int    `yaml:"buffer_size"`
+		SocketPath          string `yaml:"socket_path"`
+		BufferSize          int    `yaml:"buffer_size"`
+		ReconnectIntervalMs int    `yaml:"reconnect_interval_ms"`
 	} `yaml:"tetragon"`
 	DecisionEngine struct {
 		Thresholds struct {
@@ -82,11 +84,23 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 	cfg.Agent.Discovery.WhitelistPath = "data/discovery/auto_whitelist.yaml"
 	cfg.Agent.Discovery.AutoGenerateWhitelist = true
 	cfg.Server.MetricsPort = 9090
+	cfg.Server.HealthPort = 8080
 	cfg.Tetragon.SocketPath = "/var/run/tetragon/tetragon.sock"
 	cfg.Tetragon.BufferSize = 50000
+	cfg.Tetragon.ReconnectIntervalMs = 2000
+	cfg.DecisionEngine.Thresholds.GreenMax = 39
+	cfg.DecisionEngine.Thresholds.YellowMax = 69
 
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
+	}
+
+	// Validate agent mode.
+	switch cfg.Agent.Mode {
+	case "discovery", "shadow", "enforcement", "":
+		// valid (empty falls through to default below)
+	default:
+		return nil, fmt.Errorf("invalid agent mode %q: must be discovery|shadow|enforcement", cfg.Agent.Mode)
 	}
 
 	// Defaults for empty or invalid values.

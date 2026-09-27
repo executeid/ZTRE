@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ztre.fullname" . }}-config
+  namespace: ztre-system
+  labels:
+    {{- include "ztre.labels" . | nindent 4 }}
+data:
+  agent_config.yaml: |
+    server:
+      metrics_port: {{ .Values.metrics.port }}
+      health_port: {{ default 8080 .Values.metrics.healthPort }}
+
+    tetragon:
+      socket_path: {{ .Values.tetragon.socketPath | quote }}
+      reconnect_interval_ms: {{ default 2000 .Values.tetragon.reconnectIntervalMs }}
+      buffer_size: {{ default 50000 .Values.tetragon.bufferSize }}
+
+    agent:
+      mode: {{ .Values.agent.mode | quote }}
+      worker_count: {{ .Values.agent.workerCount }}
+      discovery:
+        learning_window: {{ default "72h" .Values.agent.discovery.learningWindow | quote }}
+        snapshot_interval: {{ default "1h" .Values.agent.discovery.snapshotInterval | quote }}
+        stability_threshold: {{ default "4h" .Values.agent.discovery.stabilityThreshold | quote }}
+        max_snapshots: {{ default 24 .Values.agent.discovery.maxSnapshots }}
+        auto_generate_whitelist: {{ default true .Values.agent.discovery.autoGenerateWhitelist }}
+        output_dir: {{ default "/data/discovery" .Values.agent.discovery.outputDir | quote }}
+        whitelist_path: {{ default "/data/discovery/auto_whitelist.yaml" .Values.agent.discovery.whitelistPath | quote }}
+
+    decision_engine:
+      thresholds:
+        green_max: {{ .Values.thresholds.greenMax }}
+        yellow_max: {{ .Values.thresholds.yellowMax }}
+
+  process_lineage_whitelist.yaml: |
+{{ .Values.whitelist | toYaml | indent 4 }}
+
+  risk_scoring_policy.yaml: |
+{{ .Values.riskPolicy | toYaml | indent 4 }}

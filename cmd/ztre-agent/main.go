@@ -156,13 +156,48 @@ func main() {
 		zap.Int("workers", workerCount),
 	)
 
-	// 3. Initialize Stage 3 & Stage 4 Engines
+	// 3. Initialize Discovery Engine
+	tracker := discovery.NewBehaviorTracker(logger)
+	store := discovery.NewBaselineStore(
+		tracker,
+		cfg.Agent.Discovery.OutputDir,
+		cfg.Agent.Discovery.SnapshotInterval.Duration,
+		cfg.Agent.Discovery.StabilityThreshold.Duration,
+		logger,
+	)
+	if cfg.Agent.Discovery.MaxSnapshots > 0 {
+		store.MaxSnapshots = cfg.Agent.Discovery.MaxSnapshots
+	}
+	reporter := discovery.NewBaselineReporter(tracker, store, logger)
+
+	// Restore previous baseline if any.
+	if err := store.LoadLatestSnapshot(); err != nil {
+		logger.Warn("could not load previous baseline", zap.Error(err))
+	}
+
+	// Handle --generate-report: produce report from existing data and exit.
+	if genReport {
+		if err := reporter.WriteReport(cfg.Agent.Discovery.OutputDir); err != nil {
+			logger.Error("failed to write report", zap.Error(err))
+			os.Exit(1)
+		}
+		if cfg.Agent.Discovery.AutoGenerateWhitelist {
+			if err := reporter.WriteWhitelist(whitelistPath); err != nil {
+				logger.Error("failed to write whitelist", zap.Error(err))
+				os.Exit(1)
+			}
+		}
+		logger.Info("report generated, exiting")
+		return
+	}
+
+	// 4. Initialize Stage 3 & Stage 4 Engines
 	var (
 		whitelist           *validator.Whitelist
 		riskEngine          *risk.Engine
 		decisionEngine      *decision.Engine
 		alertDispatcher     *decision.Dispatcher
-		containmentExecutor *containment.Executor
+		containmentExecutor containment.ContainmentExecutor
 	)
 
 	thresholds := decision.ThresholdConfig{
@@ -218,50 +253,23 @@ func main() {
 		)
 	}
 
-	// 4. Initialize Discovery Engine
-	tracker := discovery.NewBehaviorTracker(logger)
-	store := discovery.NewBaselineStore(
-		tracker,
-		cfg.Agent.Discovery.OutputDir,
-		cfg.Agent.Discovery.SnapshotInterval.Duration,
-		cfg.Agent.Discovery.StabilityThreshold.Duration,
-		logger,
-	)
-	if cfg.Agent.Discovery.MaxSnapshots > 0 {
-		store.MaxSnapshots = cfg.Agent.Discovery.MaxSnapshots
-	}
-	reporter := discovery.NewBaselineReporter(tracker, store, logger)
-
-	// Restore previous baseline if any.
-	if err := store.LoadLatestSnapshot(); err != nil {
-		logger.Warn("could not load previous baseline", zap.Error(err))
-	}
-
-	// Handle --generate-report: produce report from existing data and exit.
-	if genReport {
-		if err := reporter.WriteReport(cfg.Agent.Discovery.OutputDir); err != nil {
-			logger.Error("failed to write report", zap.Error(err))
-			os.Exit(1)
-		}
-		if cfg.Agent.Discovery.AutoGenerateWhitelist {
-			if err := reporter.WriteWhitelist(whitelistPath); err != nil {
-				logger.Error("failed to write whitelist", zap.Error(err))
-				os.Exit(1)
-			}
-		}
-		logger.Info("report generated, exiting")
-		return
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	streamCtx, streamCancel := context.WithCancel(ctx)
+	defer streamCancel()
+
+	metricsCtx, metricsCancel := context.WithCancel(context.Background())
+	defer metricsCancel()
 
 	// 5. Setup Signal Handling for Graceful Shutdown and Hot Reloading
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigChan)
 
 	sighupChan := make(chan os.Signal, 1)
 	signal.Notify(sighupChan, syscall.SIGHUP)
+	defer signal.Stop(sighupChan)
 
 	go func() {
 		for {
@@ -279,16 +287,29 @@ func main() {
 						zap.String("output_dir", reloadedCfg.Agent.Discovery.OutputDir),
 					)
 					if reloadedCfg.DecisionEngine.Thresholds.GreenMax > 0 && reloadedCfg.DecisionEngine.Thresholds.YellowMax > 0 {
-						decisionEngine.UpdateThresholds(decision.ThresholdConfig{
+						if err := decisionEngine.UpdateThresholds(decision.ThresholdConfig{
 							GreenMax:  reloadedCfg.DecisionEngine.Thresholds.GreenMax,
 							YellowMax: reloadedCfg.DecisionEngine.Thresholds.YellowMax,
-						})
+						}); err != nil {
+							logger.Error("failed to update decision thresholds", zap.Error(err))
+						}
 					}
 				}
 
 				targetWlPath := whitelistPath
 				if reloadedCfg != nil && reloadedCfg.Agent.Discovery.WhitelistPath != "" && !whitelistPathSet {
 					targetWlPath = reloadedCfg.Agent.Discovery.WhitelistPath
+				}
+
+				if whitelist != nil {
+					if err := whitelist.Load(); err != nil {
+						logger.Error("failed to reload whitelist on SIGHUP", zap.String("path", whitelistPath), zap.Error(err))
+					} else {
+						if err := whitelist.LoadMulti(manualWlPath); err != nil {
+							logger.Warn("could not reload manual whitelist overrides", zap.Error(err))
+						}
+						logger.Info("validator whitelist reloaded successfully on SIGHUP")
+					}
 				}
 
 				if wl, err := discovery.LoadWhitelist(targetWlPath); err != nil {
@@ -298,7 +319,7 @@ func main() {
 						logger.Error("failed to reload whitelist on SIGHUP", zap.String("path", targetWlPath), zap.Error(err))
 					}
 				} else {
-					logger.Info("whitelist reloaded successfully",
+					logger.Info("discovery whitelist reloaded successfully",
 						zap.String("path", targetWlPath),
 						zap.Int("lineages", len(wl.WhitelistedLineages)),
 					)
@@ -308,7 +329,7 @@ func main() {
 	}()
 
 	// 6. Start Metrics & Health Server (/metrics & /healthz)
-	metricsServer := observability.StartMetricsServer(ctx, metricsAddr, logger)
+	metricsServer := observability.StartMetricsServer(metricsCtx, metricsAddr, logger)
 
 	// 7. Initialize Event Buffer
 	eventBuffer := collector.NewEventBuffer(bufferSize, logger)
@@ -320,7 +341,7 @@ func main() {
 		storeWg.Add(1)
 		go func() {
 			defer storeWg.Done()
-			store.Run(ctx)
+			store.Run(streamCtx)
 		}()
 	}
 
@@ -464,23 +485,24 @@ func main() {
 	clientDone := make(chan struct{})
 	go func() {
 		defer close(clientDone)
-		if err := tetraClient.Start(ctx); err != nil {
+		if err := tetraClient.Start(streamCtx); err != nil {
 			logger.Error("Tetragon client stopped with error", zap.Error(err))
 		}
 	}()
 
 	// Wait for shutdown signal
 	sig := <-sigChan
-	cancel() // Cancel context immediately to stop background workers and client stream
 	logger.Info("received termination signal, initiating graceful shutdown", zap.String("signal", sig.String()))
 
-	// 1. Wait for Tetragon collector client stream and background store loop to terminate
+	// 1. Stop intake stream: cancel streamCtx so collector client stream and store loop terminate
+	streamCancel()
 	<-clientDone
 	storeWg.Wait()
 
-	// 2. Close buffer and wait for all workers to finish draining
+	// 2. Close buffer and wait for all workers to finish draining in-flight events
 	eventBuffer.Close()
 	wg.Wait()
+	cancel() // All workers drained, cancel remaining pipeline context
 
 	// 3. Save final baseline snapshot (discovery + shadow modes)
 	if agentMode == discovery.ModeDiscovery || agentMode == discovery.ModeShadow {
@@ -504,6 +526,7 @@ func main() {
 	}
 
 	// 5. Shutdown metrics server
+	metricsCancel()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer shutdownCancel()
 	_ = metricsServer.Shutdown(shutdownCtx)

@@ -1,0 +1,18 @@
+ZTRE (Zero-Trust Runtime Enforcement) agent installed.
+
+Release: {{ .Release.Name }}
+Namespace: ztre-system
+Mode: {{ .Values.agent.mode }}
+
+1. Verify DaemonSet status:
+   kubectl rollout status daemonset/{{ include "ztre.fullname" . }} -n ztre-system
+
+2. Check running agent pods:
+   kubectl get pods -n ztre-system -l {{ include "ztre.selectorLabels" . | replace "\n" "," }}
+
+3. View agent logs:
+   kubectl logs -n ztre-system -l {{ include "ztre.selectorLabels" . | replace "\n" "," }} -c ztre-agent -f
+
+4. Scrape metrics endpoint:
+   kubectl port-forward -n ztre-system daemonset/{{ include "ztre.fullname" . }} {{ .Values.metrics.port }}:{{ .Values.metrics.port }}
+   curl http://localhost:{{ .Values.metrics.port }}/metrics

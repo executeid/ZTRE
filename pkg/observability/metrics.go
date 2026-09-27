@@ -16,7 +16,6 @@ var (
 	EventsIngestedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "ztre",
-			Subsystem: "collector",
 			Name:      "events_ingested_total",
 			Help:      "Total number of events ingested from Tetragon.",
 		},
@@ -26,7 +25,6 @@ var (
 	EventsDroppedTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: "ztre",
-			Subsystem: "collector",
 			Name:      "events_dropped_total",
 			Help:      "Total number of events dropped due to buffer overflow.",
 		},
@@ -35,7 +33,6 @@ var (
 	EventParseDuration = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
 			Namespace: "ztre",
-			Subsystem: "collector",
 			Name:      "event_parse_duration_seconds",
 			Help:      "Latency of parsing raw Tetragon events.",
 			Buckets:   []float64{0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01}, // 10µs to 10ms
@@ -93,11 +90,10 @@ var (
 	EventsClassifiedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "ztre",
-			Subsystem: "validator",
 			Name:      "events_classified_total",
 			Help:      "Total events classified by lineage validation.",
 		},
-		[]string{"classification"},
+		[]string{"status"},
 	)
 
 	RiskScoreHistogram = prometheus.NewHistogram(
@@ -114,8 +110,7 @@ var (
 	ContainmentActionsTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: "ztre",
-			Subsystem: "containment",
-			Name:      "actions_total",
+			Name:      "containment_actions_total",
 			Help:      "Total number of automated network containment actions executed.",
 		},
 	)
@@ -123,7 +118,6 @@ var (
 	ApiErrorsTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: "ztre",
-			Subsystem: "containment",
 			Name:      "api_errors_total",
 			Help:      "Total number of Kubernetes API errors encountered during containment.",
 		},

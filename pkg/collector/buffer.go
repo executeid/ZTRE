@@ -10,12 +10,13 @@ import (
 
 // EventBuffer provides a high-throughput, bounded, non-blocking in-memory queue.
 type EventBuffer struct {
-	events      chan *SecurityEvent
-	capacity    int
-	dropped     uint64
-	logger      *zap.Logger
-	closeOnce   sync.Once
-	isClosed    atomic.Bool
+	events    chan *SecurityEvent
+	capacity  int
+	dropped   uint64
+	logger    *zap.Logger
+	closeOnce sync.Once
+	mu        sync.RWMutex
+	isClosed  bool
 }
 
 // NewEventBuffer creates an event queue with the specified capacity.
@@ -34,7 +35,14 @@ func NewEventBuffer(capacity int, logger *zap.Logger) *EventBuffer {
 // Push adds an event to the buffer. If the buffer is full, it drops the event
 // and increments the dropped counter to prevent memory exhaustion (overflow strategy).
 func (b *EventBuffer) Push(event *SecurityEvent) bool {
-	if b.isClosed.Load() || event == nil {
+	if event == nil {
+		return false
+	}
+
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if b.isClosed {
 		return false
 	}
 
@@ -82,7 +90,9 @@ func (b *EventBuffer) Cap() int {
 // Close gracefully closes the event channel.
 func (b *EventBuffer) Close() {
 	b.closeOnce.Do(func() {
-		b.isClosed.Store(true)
+		b.mu.Lock()
+		b.isClosed = true
 		close(b.events)
+		b.mu.Unlock()
 	})
 }

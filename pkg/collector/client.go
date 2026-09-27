@@ -67,10 +67,10 @@ func (c *Client) Start(ctx context.Context) error {
 		c.logger.Info("connecting to Tetragon gRPC server", zap.String("socket", c.config.SocketPath))
 		startTime := time.Now()
 		err := c.streamEvents(ctx)
+		if ctx.Err() != nil {
+			return nil
+		}
 		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
 			// If stream ran successfully for at least 5 seconds before failing, reset backoff
 			if time.Since(startTime) >= 5*time.Second {
 				backoff = c.config.ReconnectInterval

@@ -1,0 +1,19 @@
+{{- if .Values.cilium.quarantinePolicy.enabled }}
+apiVersion: "cilium.io/v2"
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: {{ include "ztre.fullname" . }}-quarantine-policy
+  labels:
+    {{- include "ztre.labels" . | nindent 4 }}
+spec:
+  description: "ZTRE Automated Zero-Trust Quarantine: Explicitly denies all ingress and egress traffic for pods labeled with ztre/quarantine=true"
+  endpointSelector:
+    matchLabels:
+      ztre/quarantine: "true"
+  ingressDeny:
+  - fromEntities:
+    - all
+  egressDeny:
+  - toEntities:
+    - all
+{{- end }}

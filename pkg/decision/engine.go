@@ -1,6 +1,7 @@
 package decision
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/executeid/ztre/pkg/risk"
@@ -43,14 +44,19 @@ func NewEngine(cfg ThresholdConfig, logger *zap.Logger) *Engine {
 }
 
 // UpdateThresholds safely hot-reloads threshold values.
-func (e *Engine) UpdateThresholds(cfg ThresholdConfig) {
+// Returns error if YellowMax <= GreenMax to prevent corrupted triage.
+func (e *Engine) UpdateThresholds(cfg ThresholdConfig) error {
+	if cfg.YellowMax <= cfg.GreenMax {
+		return fmt.Errorf("invalid thresholds: yellow_max (%d) must exceed green_max (%d)", cfg.YellowMax, cfg.GreenMax)
+	}
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	e.thresholds = cfg
+	e.mu.Unlock()
 	e.logger.Info("decision engine thresholds updated",
 		zap.Int("green_max", cfg.GreenMax),
 		zap.Int("yellow_max", cfg.YellowMax),
 	)
+	return nil
 }
 
 // Thresholds returns a copy of current threshold configuration.
@@ -61,18 +67,20 @@ func (e *Engine) Thresholds() ThresholdConfig {
 }
 
 // Evaluate determines the Action based on a raw numeric total risk score.
-// Green:  score <= GreenMax (e.g. < 40)  -> ALLOW & LOG
-// Yellow: score <= YellowMax (e.g. 40–69) -> LOG & ALERT
-// Red:    score > YellowMax  (e.g. >= 70) -> AUTO CONTAINMENT
+// Green:  score < GreenMax+1 (i.e. < 40)  -> ALLOW & LOG
+// Yellow: score < YellowMax+1 (i.e. 40–69) -> LOG & ALERT
+// Red:    score >= YellowMax+1 (i.e. >= 70) -> AUTO CONTAINMENT
 func (e *Engine) Evaluate(totalScore float64) Action {
 	e.mu.RLock()
 	cfg := e.thresholds
 	e.mu.RUnlock()
 
+	// Use < (max+1) to correctly handle fractional scores per PRD:
+	// Green < 40, Yellow 40–69, Red >= 70.
 	switch {
-	case totalScore <= float64(cfg.GreenMax):
+	case totalScore < float64(cfg.GreenMax+1):
 		return ActionAllowAndLog
-	case totalScore <= float64(cfg.YellowMax):
+	case totalScore < float64(cfg.YellowMax+1):
 		return ActionLogAndAlert
 	default:
 		return ActionAutoContainment

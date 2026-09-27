@@ -1,0 +1,108 @@
+image:
+  repository: ztre-agent
+  tag: "1.0.0"
+  pullPolicy: IfNotPresent
+
+agent:
+  mode: enforcement
+  workerCount: 4
+  discovery:
+    learningWindow: 72h
+    snapshotInterval: 1h
+    stabilityThreshold: 4h
+    maxSnapshots: 24
+    autoGenerateWhitelist: true
+    outputDir: /data/discovery
+    whitelistPath: /data/discovery/auto_whitelist.yaml
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+metrics:
+  port: 9090
+  healthPort: 8080
+
+tetragon:
+  socketPath: /var/run/tetragon/tetragon.sock
+  reconnectIntervalMs: 2000
+  bufferSize: 50000
+
+thresholds:
+  greenMax: 39
+  yellowMax: 69
+
+whitelist:
+  whitelisted_lineages:
+    - parent: nginx
+      allowed_children:
+        - nginx
+        - sh
+    - parent: java
+      allowed_children:
+        - java
+    - parent: postgres
+      allowed_children:
+        - postgres
+        - pg_dump
+    - parent: node
+      allowed_children:
+        - node
+        - npm
+    - parent: containerd-shim-runc-v2
+      allowed_children:
+        - sh
+        - ztre-agent
+        - nginx
+        - postgres
+    - parent: runc
+      allowed_children:
+        - sh
+
+riskPolicy:
+  weights:
+    severity: 0.50
+    context: 0.30
+    asset_criticality: 0.20
+  severity_scores:
+    reverse_shell: 100
+    chmod_suid: 90
+    curl_download: 80
+    bash_spawn: 70
+    file_write_etc: 60
+    nmap_scan: 85
+    default: 20
+  context_scores:
+    NORMAL: 0
+    SUSPICIOUS: 50
+    ANOMALOUS: 100
+  asset_criticality:
+    critical:
+      namespaces:
+        - database
+        - secrets
+        - auth
+      score: 100
+    high:
+      namespaces:
+        - api
+        - messaging
+      score: 75
+    medium:
+      namespaces:
+        - backend
+      score: 50
+    low:
+      namespaces:
+        - frontend
+        - static
+      score: 25
+    default_score: 50
+
+cilium:
+  quarantinePolicy:
+    enabled: true

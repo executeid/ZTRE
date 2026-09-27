@@ -59,6 +59,43 @@ func TestEventBuffer_Overflow(t *testing.T) {
 	}
 }
 
+func TestEventBuffer_ConcurrentPushClose(t *testing.T) {
+	logger := zap.NewNop()
+	buf := NewEventBuffer(100, logger)
+
+	var wg sync.WaitGroup
+	const numProducers = 10
+	ev := &SecurityEvent{EventType: EventTypeExecve, Namespace: "test", PodName: "p"}
+
+	// Start producers pushing in loop
+	for i := 0; i < numProducers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 500; j++ {
+				_ = buf.Push(ev)
+			}
+		}()
+	}
+
+	// Drainer in background
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		for range buf.Events() {
+		}
+	}()
+
+	// Close buffer concurrently while producers are pushing
+	time.Sleep(2 * time.Millisecond)
+	buf.Close()
+	// Duplicate close must be safe
+	buf.Close()
+
+	wg.Wait()
+	<-drainDone
+}
+
 func BenchmarkEventBuffer_Throughput(b *testing.B) {
 	logger := zap.NewNop()
 	buf := NewEventBuffer(100000, logger)

@@ -27,12 +27,14 @@ func TestEngine_ThresholdBoundaries(t *testing.T) {
 	}{
 		{0.0, ActionAllowAndLog},
 		{20.0, ActionAllowAndLog},
-		{39.0, ActionAllowAndLog},       // boundary: <= 39 -> Green
-		{39.1, ActionLogAndAlert},       // > 39 -> Yellow
+		{39.0, ActionAllowAndLog},       // boundary: < 40 -> Green
+		{39.1, ActionAllowAndLog},       // 39.1 < 40 -> Green (PRD: Green < 40)
+		{39.9, ActionAllowAndLog},       // 39.9 < 40 -> Green
 		{40.0, ActionLogAndAlert},       // 40 -> Yellow
 		{60.0, ActionLogAndAlert},       // 60 -> Yellow
-		{69.0, ActionLogAndAlert},       // boundary: <= 69 -> Yellow
-		{69.1, ActionAutoContainment},   // > 69 -> Red
+		{69.0, ActionLogAndAlert},       // boundary: < 70 -> Yellow
+		{69.1, ActionLogAndAlert},       // 69.1 < 70 -> Yellow (PRD: Yellow 40-69)
+		{69.9, ActionLogAndAlert},       // 69.9 < 70 -> Yellow
 		{70.0, ActionAutoContainment},   // 70 -> Red
 		{85.0, ActionAutoContainment},   // 85 -> Red
 		{100.0, ActionAutoContainment},  // 100 -> Red
@@ -70,7 +72,9 @@ func TestEngine_HotReloadThresholds(t *testing.T) {
 	}
 
 	// Tighten thresholds: Yellow max becomes 45
-	engine.UpdateThresholds(ThresholdConfig{GreenMax: 30, YellowMax: 45})
+	if err := engine.UpdateThresholds(ThresholdConfig{GreenMax: 30, YellowMax: 45}); err != nil {
+		t.Fatal(err)
+	}
 
 	// Now score 50 becomes Red
 	if got := engine.Evaluate(50); got != ActionAutoContainment {

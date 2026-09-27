@@ -68,11 +68,12 @@ func (w *Whitelist) Load() error {
 	}
 	allow := make(map[string]map[string]bool, len(cfg.WhitelistedLineages))
 	for _, entry := range cfg.WhitelistedLineages {
+		parent := filepath.Base(entry.Parent)
 		children := make(map[string]bool, len(entry.AllowedChildren))
 		for _, c := range entry.AllowedChildren {
-			children[c] = true
+			children[filepath.Base(c)] = true
 		}
-		allow[entry.Parent] = children
+		allow[parent] = children
 	}
 	w.mu.Lock()
 	w.allow = allow
@@ -100,13 +101,14 @@ func (w *Whitelist) LoadMulti(paths ...string) error {
 		}
 		w.mu.Lock()
 		for _, entry := range cfg.WhitelistedLineages {
-			existing, ok := w.allow[entry.Parent]
+			parent := filepath.Base(entry.Parent)
+			existing, ok := w.allow[parent]
 			if !ok {
 				existing = make(map[string]bool)
-				w.allow[entry.Parent] = existing
+				w.allow[parent] = existing
 			}
 			for _, c := range entry.AllowedChildren {
-				existing[c] = true
+				existing[filepath.Base(c)] = true
 			}
 		}
 		w.mu.Unlock()
