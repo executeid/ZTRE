@@ -114,9 +114,9 @@ POST_CONTAINMENTS=$(echo "$POST_METRICS" | grep '^ztre_containment_actions_total
 POST_ERRORS=$(echo "$POST_METRICS" | grep '^ztre_api_errors_total ' | awk '{print $2}' || echo "0")
 POST_DROPPED=$(echo "$POST_METRICS" | grep '^ztre_events_dropped_total ' | awk '{print $2}' || echo "0")
 
-NEW_CONTAINMENTS=$(echo "$POST_CONTAINMENTS - $PRE_CONTAINMENTS" | bc 2>/dev/null || echo "?")
-NEW_ERRORS=$(echo "$POST_ERRORS - $PRE_ERRORS" | bc 2>/dev/null || echo "?")
-NEW_DROPPED=$(echo "$POST_DROPPED - $PRE_DROPPED" | bc 2>/dev/null || echo "?")
+NEW_CONTAINMENTS=$(awk "BEGIN {printf \"%.0f\", $POST_CONTAINMENTS - $PRE_CONTAINMENTS}" 2>/dev/null || echo "?")
+NEW_ERRORS=$(awk "BEGIN {printf \"%.0f\", $POST_ERRORS - $PRE_ERRORS}" 2>/dev/null || echo "?")
+NEW_DROPPED=$(awk "BEGIN {printf \"%.0f\", $POST_DROPPED - $PRE_DROPPED}" 2>/dev/null || echo "?")
 
 # 6. Write JSON results
 RESULTS_JSON=$(printf '%s\n' "${RESULTS[@]}" | paste -sd',' -)
