@@ -46,13 +46,32 @@ for i in 1 2 3; do
 done
 log_pass "All 3 attack target pods running"
 
+# Metrics source: Prometheus over a port-forward (bastion has no route to pod IPs)
+pkill -f "port-forward.*prometheus.*9092" 2>/dev/null || true
+sleep 1
+kubectl port-forward -n monitoring svc/prometheus 9092:9090 --address 127.0.0.1 \
+    >/tmp/concurrent-prom-pf.log 2>&1 &
+PF_PID=$!
+sleep 4
+
+promval() {
+    local expr="$1"
+    local enc
+    enc=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$expr")
+    curl -sf "http://127.0.0.1:9092/api/v1/query?query=${enc}" 2>/dev/null | python3 -c '
+import json,sys
+try:
+    r=json.load(sys.stdin)["data"]["result"]
+    print(r[0]["value"][1] if r else "0")
+except Exception:
+    print("0")
+'
+}
+
 # Get agent metrics baseline
-AGENT_IP=$(kubectl get pods -n ztre-system -l app.kubernetes.io/name=ztre-agent \
-    -o jsonpath='{.items[0].status.podIP}')
-PRE_METRICS=$(curl -sf "http://${AGENT_IP}:9090/metrics" 2>/dev/null || echo "")
-PRE_CONTAINMENTS=$(echo "$PRE_METRICS" | grep '^ztre_containment_actions_total ' | awk '{print $2}' || echo "0")
-PRE_ERRORS=$(echo "$PRE_METRICS" | grep '^ztre_api_errors_total ' | awk '{print $2}' || echo "0")
-PRE_DROPPED=$(echo "$PRE_METRICS" | grep '^ztre_events_dropped_total ' | awk '{print $2}' || echo "0")
+PRE_CONTAINMENTS=$(promval 'sum(ztre_containment_actions_total)')
+PRE_ERRORS=$(promval 'sum(ztre_api_errors_total)')
+PRE_DROPPED=$(promval 'sum(ztre_events_dropped_total)')
 
 # 2. Launch all 3 attacks SIMULTANEOUSLY
 log_info "Launching 3 concurrent attacks..."
@@ -82,6 +101,9 @@ log_info "All 3 attacks launched in ${ATTACK_DURATION_MS}ms"
 # 3. Wait for ZTRE to process and quarantine
 log_info "Waiting 5s for ZTRE pipeline to process all events..."
 sleep 5
+# Allow Prometheus to scrape the post-attack counters (scrape interval is 15s)
+log_info "Waiting 16s for Prometheus to scrape updated counters..."
+sleep 16
 
 # 4. Verify quarantine status for all 3 pods
 PASS_COUNT=0
@@ -108,15 +130,14 @@ for i in 1 2 3; do
     RESULTS+=("{\"pod\":\"attack-target-${i}\",\"status\":\"${STATUS}\",\"phase\":\"${PHASE}\",\"restarts\":${RESTARTS}}")
 done
 
-# 5. Check metrics for errors and drops
-POST_METRICS=$(curl -sf "http://${AGENT_IP}:9090/metrics" 2>/dev/null || echo "")
-POST_CONTAINMENTS=$(echo "$POST_METRICS" | grep '^ztre_containment_actions_total ' | awk '{print $2}' || echo "0")
-POST_ERRORS=$(echo "$POST_METRICS" | grep '^ztre_api_errors_total ' | awk '{print $2}' || echo "0")
-POST_DROPPED=$(echo "$POST_METRICS" | grep '^ztre_events_dropped_total ' | awk '{print $2}' || echo "0")
+# 5. Check metrics for errors and drops via Prometheus
+POST_CONTAINMENTS=$(promval 'sum(ztre_containment_actions_total)')
+POST_ERRORS=$(promval 'sum(ztre_api_errors_total)')
+POST_DROPPED=$(promval 'sum(ztre_events_dropped_total)')
 
-NEW_CONTAINMENTS=$(awk "BEGIN {printf \"%.0f\", $POST_CONTAINMENTS - $PRE_CONTAINMENTS}" 2>/dev/null || echo "?")
-NEW_ERRORS=$(awk "BEGIN {printf \"%.0f\", $POST_ERRORS - $PRE_ERRORS}" 2>/dev/null || echo "?")
-NEW_DROPPED=$(awk "BEGIN {printf \"%.0f\", $POST_DROPPED - $PRE_DROPPED}" 2>/dev/null || echo "?")
+NEW_CONTAINMENTS=$(awk "BEGIN {printf \"%.0f\", ${POST_CONTAINMENTS:-0} - ${PRE_CONTAINMENTS:-0}}")
+NEW_ERRORS=$(awk "BEGIN {printf \"%.0f\", ${POST_ERRORS:-0} - ${PRE_ERRORS:-0}}")
+NEW_DROPPED=$(awk "BEGIN {printf \"%.0f\", ${POST_DROPPED:-0} - ${PRE_DROPPED:-0}}")
 
 # 6. Write JSON results
 RESULTS_JSON=$(printf '%s\n' "${RESULTS[@]}" | paste -sd',' -)
@@ -162,5 +183,6 @@ log_info "Cleaning up attack target pods..."
 for i in 1 2 3; do
     kubectl delete pod "attack-target-${i}" -n ztre-test --ignore-not-found=true >/dev/null 2>&1 || true
 done
+kill $PF_PID 2>/dev/null || true
 
 echo "======================================================================"
