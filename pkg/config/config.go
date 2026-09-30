@@ -31,6 +31,28 @@ type AgentConfig struct {
 			YellowMax int `yaml:"yellow_max"`
 		} `yaml:"thresholds"`
 	} `yaml:"decision_engine"`
+	// ExcludeNamespaces lists namespaces whose process events are ignored by the
+	// enforcement pipeline. This prevents ZTRE from quarantining infrastructure
+	// workloads (e.g. Prometheus scrapers that exec helper binaries) whose
+	// behavior is expected to be dynamic.
+	ExcludeNamespaces []string `yaml:"exclude_namespaces"`
+}
+
+// IsNamespaceExcluded reports whether the given namespace should bypass the
+// classification and enforcement pipeline entirely. An empty list excludes
+// nothing; the built-in defaults below always apply.
+func (c *AgentConfig) IsNamespaceExcluded(ns string) bool {
+	switch ns {
+	case "ztre-system", "kube-system", "kube-public", "kube-node-lease", "cilium-secrets":
+		// Always-exempt control-plane namespaces.
+		return true
+	}
+	for _, excluded := range c.ExcludeNamespaces {
+		if excluded == ns {
+			return true
+		}
+	}
+	return false
 }
 
 // DiscoveryConfig holds settings for the behavioral discovery phase.

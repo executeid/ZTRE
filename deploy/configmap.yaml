@@ -8,6 +8,15 @@ metadata:
     app.kubernetes.io/part-of: ztre
 data:
   agent_config.yaml: |
+    # Namespaces whose process events are ignored entirely by the enforcement
+    # pipeline. Prevents ZTRE from quarantining dynamic infrastructure such as
+    # Prometheus scrapers. ztre-system, kube-system and other control-plane
+    # namespaces are always exempt and need not be listed here.
+    exclude_namespaces:
+      - monitoring
+      - cilium-monitoring
+      - observability
+
     server:
       metrics_port: 9090
       health_port: 8080

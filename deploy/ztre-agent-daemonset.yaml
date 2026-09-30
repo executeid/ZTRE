@@ -26,7 +26,7 @@ spec:
                 operator: DoesNotExist
       containers:
       - name: ztre-agent
-        image: ztre-agent:v0.4.0
+        image: ztre-agent:v0.4.1
         imagePullPolicy: Never  # Image loaded locally via ctr import
         securityContext:
           runAsUser: 0

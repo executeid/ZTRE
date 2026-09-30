@@ -353,6 +353,11 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for event := range eventBuffer.Events() {
+				// Skip control-plane and infrastructure namespaces (e.g. monitoring)
+				// so ZTRE never quarantines dynamic infra workloads such as scrapers.
+				if cfg.IsNamespaceExcluded(event.Namespace) {
+					continue
+				}
 				switch agentMode {
 				case discovery.ModeDiscovery:
 					// Pure observation — track pattern, no classification.

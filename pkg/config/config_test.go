@@ -196,3 +196,41 @@ agent:
 		t.Fatal("expected error for invalid duration string")
 	}
 }
+
+func TestIsNamespaceExcluded(t *testing.T) {
+	cfg := &AgentConfig{
+		ExcludeNamespaces: []string{"monitoring", "observability"},
+	}
+
+	cases := []struct {
+		ns       string
+		excluded bool
+	}{
+		{"monitoring", true},      // user-configured
+		{"observability", true},   // user-configured
+		{"ztre-system", true},     // built-in default
+		{"kube-system", true},     // built-in default
+		{"kube-public", true},     // built-in default
+		{"ztre-test", false},      // test workload - enforced
+		{"default", false},        // user workload - enforced
+		{"frontend", false},       // user workload - enforced
+	}
+
+	for _, c := range cases {
+		if got := cfg.IsNamespaceExcluded(c.ns); got != c.excluded {
+			t.Errorf("IsNamespaceExcluded(%q) = %v, want %v", c.ns, got, c.excluded)
+		}
+	}
+}
+
+func TestIsNamespaceExcludedEmptyList(t *testing.T) {
+	cfg := &AgentConfig{} // no user exclusions
+	// Built-in defaults still apply.
+	if !cfg.IsNamespaceExcluded("kube-system") {
+		t.Error("expected kube-system to always be excluded")
+	}
+	// Non-default namespaces are enforced.
+	if cfg.IsNamespaceExcluded("production") {
+		t.Error("expected production to NOT be excluded with empty list")
+	}
+}

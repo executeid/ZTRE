@@ -1,6 +1,6 @@
 apiVersion: v2
 name: ztre
-description: Helm chart for Zero-Trust Runtime Enforcement (ZTRE) Agent
+description: Helm chart for Zero-Trust Response Engine (ZTRE) Agent
 type: application
 version: 1.0.0
 appVersion: "1.0.0"

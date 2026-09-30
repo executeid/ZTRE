@@ -1,4 +1,4 @@
-ZTRE (Zero-Trust Runtime Enforcement) agent installed.
+ZTRE (Zero-Trust Response Engine) agent installed.
 
 Release: {{ .Release.Name }}
 Namespace: ztre-system

@@ -8,3 +8,6 @@
 /data/discovery/*.yaml
 !/data/discovery/.gitkeep
 /doc
+
+# Evidence artifacts (screenshots, recordings, generated CSVs)
+/evidence
