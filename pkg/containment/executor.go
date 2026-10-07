@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/executeid/ztre/pkg/observability"
@@ -33,8 +34,9 @@ type ContainmentExecutor interface {
 // By adding "ztre/quarantine: true" to pod labels, CiliumNetworkPolicy immediately
 // drops all ingress and egress network packets without terminating the container process.
 type Executor struct {
-	client kubernetes.Interface
-	logger *zap.Logger
+	client      kubernetes.Interface
+	logger      *zap.Logger
+	quarantined sync.Map // map[string]struct{} (key: "namespace/podName")
 }
 
 // NewExecutor creates a containment executor with a supplied Kubernetes clientset.
@@ -78,6 +80,15 @@ func NewInClusterExecutor(logger *zap.Logger) (*Executor, error) {
 // It executes with exponential retry backoff on API conflicts or transient failures.
 // CRITICAL: This operation NEVER terminates the pod or its processes (zero process kill).
 func (e *Executor) Quarantine(ctx context.Context, namespace, podName string, riskScore float64) error {
+	podKey := fmt.Sprintf("%s/%s", namespace, podName)
+	if _, already := e.quarantined.Load(podKey); already {
+		e.logger.Debug("pod already in quarantine cache, skipping redundant API patch",
+			zap.String("namespace", namespace),
+			zap.String("pod", podName),
+		)
+		return nil
+	}
+
 	startTime := time.Now()
 
 	// Strategic merge patch payload to add ztre/quarantine: "true"
@@ -98,11 +109,11 @@ func (e *Executor) Quarantine(ctx context.Context, namespace, podName string, ri
 	backoff.Duration = 100 * time.Millisecond
 	backoff.Steps = 3
 
-	// isRetryable returns true only for transient errors (server errors, timeouts).
-	// Non-retryable errors (404 Not Found, 409 Conflict, 422 Invalid) skip retries
-	// immediately to avoid unnecessary 300ms+ delay on deleted or invalid pods.
+	// isRetryable returns true for transient errors and 409 Conflict.
+	// Non-retryable errors (404 Not Found, 422 Invalid) skip retries
+	// immediately to avoid unnecessary delay on deleted or invalid pods.
 	isRetryable := func(err error) bool {
-		if k8serrors.IsNotFound(err) || k8serrors.IsConflict(err) || k8serrors.IsInvalid(err) {
+		if k8serrors.IsNotFound(err) || k8serrors.IsInvalid(err) {
 			return false
 		}
 		return err != nil
@@ -133,6 +144,7 @@ func (e *Executor) Quarantine(ctx context.Context, namespace, podName string, ri
 		return fmt.Errorf("quarantine pod %s/%s failed after retries: %w", namespace, podName, err)
 	}
 
+	e.quarantined.Store(podKey, struct{}{})
 	observability.ContainmentActionsTotal.Inc()
 	e.logger.Info("AUTOMATED CONTAINMENT EXECUTED SUCCESSFULLY",
 		zap.String("action", "AUTO_CONTAINMENT"),
@@ -146,4 +158,18 @@ func (e *Executor) Quarantine(ctx context.Context, namespace, podName string, ri
 	)
 
 	return nil
+}
+
+// IsQuarantined reports whether the pod is recorded in the quarantine cache.
+func (e *Executor) IsQuarantined(namespace, podName string) bool {
+	_, ok := e.quarantined.Load(fmt.Sprintf("%s/%s", namespace, podName))
+	return ok
+}
+
+// ResetCache clears the in-memory quarantine cache.
+func (e *Executor) ResetCache() {
+	e.quarantined.Range(func(key, value any) bool {
+		e.quarantined.Delete(key)
+		return true
+	})
 }

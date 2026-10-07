@@ -11,8 +11,13 @@ import (
 
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
+	"sync/atomic"
 )
 
 func TestQuarantine_SuccessfulPatch(t *testing.T) {
@@ -173,5 +178,72 @@ func TestQuarantine_ContextCancelled(t *testing.T) {
 		// returned — acceptable (fake ignores ctx cancellation, patch succeeds)
 	case <-time.After(3 * time.Second):
 		t.Fatal("Quarantine hung on cancelled context")
+	}
+}
+
+func TestQuarantine_DeduplicationCache(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dedup-test",
+			Namespace: "ztre-test",
+			Labels:    map[string]string{"app": "frontend"},
+		},
+	}
+	fakeClient := fake.NewSimpleClientset(pod)
+	var patchCount int32
+	fakeClient.PrependReactor("patch", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		atomic.AddInt32(&patchCount, 1)
+		return false, nil, nil
+	})
+
+	executor := NewExecutor(fakeClient, zap.NewNop())
+
+	// First call should execute patch
+	if err := executor.Quarantine(context.Background(), "ztre-test", "dedup-test", 80.0); err != nil {
+		t.Fatalf("first call failed: %v", err)
+	}
+	if atomic.LoadInt32(&patchCount) != 1 {
+		t.Fatalf("expected 1 patch call, got %d", atomic.LoadInt32(&patchCount))
+	}
+	if !executor.IsQuarantined("ztre-test", "dedup-test") {
+		t.Fatal("expected pod to be tracked in quarantine cache")
+	}
+
+	// Subsequent calls should hit cache and NOT invoke K8s API patch
+	for i := 0; i < 5; i++ {
+		if err := executor.Quarantine(context.Background(), "ztre-test", "dedup-test", 85.0); err != nil {
+			t.Fatalf("cached call %d failed: %v", i, err)
+		}
+	}
+	if atomic.LoadInt32(&patchCount) != 1 {
+		t.Fatalf("expected patchCount to remain 1 after cached calls, got %d", atomic.LoadInt32(&patchCount))
+	}
+}
+
+func TestQuarantine_ConflictRetried(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "conflict-test",
+			Namespace: "ztre-test",
+			Labels:    map[string]string{"app": "frontend"},
+		},
+	}
+	fakeClient := fake.NewSimpleClientset(pod)
+	var attempts int32
+	fakeClient.PrependReactor("patch", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		att := atomic.AddInt32(&attempts, 1)
+		if att < 3 {
+			return true, nil, k8serrors.NewConflict(schema.GroupResource{Resource: "pods"}, "conflict-test", nil)
+		}
+		return false, nil, nil
+	})
+
+	executor := NewExecutor(fakeClient, zap.NewNop())
+	err := executor.Quarantine(context.Background(), "ztre-test", "conflict-test", 85.0)
+	if err != nil {
+		t.Fatalf("expected retry on conflict to eventually succeed, got: %v", err)
+	}
+	if atomic.LoadInt32(&attempts) != 3 {
+		t.Fatalf("expected 3 attempts before conflict resolved, got %d", atomic.LoadInt32(&attempts))
 	}
 }
