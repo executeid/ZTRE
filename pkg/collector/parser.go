@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"strings"
 	"time"
 
 	"github.com/cilium/tetragon/api/v1/tetragon"
@@ -50,7 +51,19 @@ func (p *Parser) Parse(res *tetragon.GetEventsResponse) (*SecurityEvent, error) 
 		if ev.ProcessKprobe == nil {
 			return nil, nil
 		}
-		return p.buildSecurityEvent(ev.ProcessKprobe.GetProcess(), ev.ProcessKprobe.GetParent(), EventTypeKprobe, nodeName, eventTime), nil
+		secEv := p.buildSecurityEvent(ev.ProcessKprobe.GetProcess(), ev.ProcessKprobe.GetParent(), EventTypeKprobe, nodeName, eventTime)
+		if secEv != nil {
+			for _, arg := range ev.ProcessKprobe.GetArgs() {
+				if s := arg.GetStringArg(); s != "" {
+					if secEv.Arguments == "" {
+						secEv.Arguments = s
+					} else if !strings.Contains(secEv.Arguments, s) {
+						secEv.Arguments += " " + s
+					}
+				}
+			}
+		}
+		return secEv, nil
 
 	default:
 		// Other event types (throttling, loader, etc.) can be safely skipped

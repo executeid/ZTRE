@@ -837,3 +837,100 @@ whitelisted_lineages:
 		t.Fatalf("expected NORMAL after SIGHUP reload, got %s", class)
 	}
 }
+
+// TestEndToEndPipeline_KprobeFileWriteEtc verifies that EventTypeKprobe events
+// with /etc/ file writes are processed by the pipeline and trigger containment.
+func TestEndToEndPipeline_KprobeFileWriteEtc(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	defer logger.Sync() //nolint:errcheck
+
+	tempDir := t.TempDir()
+	targetPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "compromised-pod",
+			Namespace: "database",
+			Labels:    map[string]string{"app": "db-server"},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	fakeK8s := fake.NewSimpleClientset(targetPod)
+	containmentExecutor := containment.NewExecutor(fakeK8s, logger)
+
+	wlPath := filepath.Join(tempDir, "wl.yaml")
+	_ = os.WriteFile(wlPath, []byte("whitelisted_lineages:\n  - parent: sh\n    allowed_children:\n      - ls\n"), 0o644)
+	whitelist, _ := validator.NewWhitelist(wlPath, logger)
+
+	riskPolicyPath := filepath.Join(tempDir, "risk.yaml")
+	policyYAML := `
+weights:
+  severity: 0.50
+  context: 0.30
+  asset_criticality: 0.20
+severity_scores:
+  file_write_etc: 60
+  default: 20
+context_scores:
+  NORMAL: 0
+  SUSPICIOUS: 50
+  ANOMALOUS: 100
+asset_criticality:
+  critical:
+    namespaces: [database]
+    score: 100
+  default_score: 50
+`
+	_ = os.WriteFile(riskPolicyPath, []byte(policyYAML), 0o644)
+	riskEngine, _ := risk.NewEngine(riskPolicyPath, logger)
+	decisionEngine := decision.NewEngine(decision.ThresholdConfig{GreenMax: 39, YellowMax: 69}, logger)
+
+	// Simulate Kprobe event: unexpected process modifying /etc/shadow in database namespace
+	kprobeEv := &collector.SecurityEvent{
+		EventType:    collector.EventTypeKprobe,
+		ParentBinary: "sh",
+		Binary:       "touch",
+		Arguments:    "/etc/shadow",
+		Namespace:    "database",
+		PodName:      "compromised-pod",
+	}
+
+	// Filter logic matching main.go ModeEnforcement
+	if kprobeEv.EventType != collector.EventTypeExecve &&
+		kprobeEv.EventType != collector.EventTypeKprobe &&
+		kprobeEv.EventType != collector.EventTypeFileAccess {
+		t.Fatalf("kprobe event should NOT be dropped by intake filter")
+	}
+
+	class := whitelist.Classify(kprobeEv.ParentBinary, kprobeEv.Binary)
+	if class == validator.ClassNormal && kprobeEv.EventType == collector.EventTypeExecve {
+		t.Fatalf("kprobe event must not break even if normal lineage")
+	}
+
+	score := riskEngine.Calculate(kprobeEv, class)
+	// S=60 (file_write_etc), C=100 (ANOMALOUS), A=100 (database critical)
+	// Total = 0.50*60 + 0.30*100 + 0.20*100 = 30 + 30 + 20 = 80 -> RED
+	if score.SeverityScore != 60 {
+		t.Errorf("expected severity 60 for file_write_etc, got %.0f", score.SeverityScore)
+	}
+	if score.TotalScore != 80 {
+		t.Errorf("expected total risk score 80, got %.1f", score.TotalScore)
+	}
+
+	action := decisionEngine.EvaluateRiskScore(score)
+	if action != decision.ActionAutoContainment {
+		t.Fatalf("expected AUTO_CONTAINMENT, got %s", action)
+	}
+
+	// Execute containment
+	if err := containmentExecutor.Quarantine(context.Background(), kprobeEv.Namespace, kprobeEv.PodName, score.TotalScore); err != nil {
+		t.Fatalf("containment failed: %v", err)
+	}
+
+	// Assert quarantine label was applied
+	pod, err := fakeK8s.CoreV1().Pods("database").Get(context.Background(), "compromised-pod", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	if val := pod.Labels[containment.QuarantineLabelKey]; val != containment.QuarantineLabelValue {
+		t.Errorf("expected label %s=%s, got %s", containment.QuarantineLabelKey, containment.QuarantineLabelValue, val)
+	}
+}

@@ -307,6 +307,39 @@ func TestEngine_Zone_FractionalScores(t *testing.T) {
 	}
 }
 
+func TestEngine_FileWriteEtc(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "policy.yaml")
+	if err := os.WriteFile(p, []byte(testPolicy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := NewEngine(p, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Kprobe targeting /etc/ must match file_write_etc (severity 60).
+	kprobeEv := makeEvent("/bin/touch", "/etc/shadow", "database", collector.EventTypeKprobe)
+	kprobeScore := engine.Calculate(kprobeEv, validator.ClassNormal)
+	if kprobeScore.SeverityScore != 60 {
+		t.Errorf("expected severity 60 for kprobe /etc/, got %.0f", kprobeScore.SeverityScore)
+	}
+
+	// FileAccess targeting /etc/ must match file_write_etc (severity 60).
+	faEv := makeEvent("/bin/vi", "/etc/passwd", "database", collector.EventTypeFileAccess)
+	faScore := engine.Calculate(faEv, validator.ClassNormal)
+	if faScore.SeverityScore != 60 {
+		t.Errorf("expected severity 60 for file_access /etc/, got %.0f", faScore.SeverityScore)
+	}
+
+	// Execve with /etc/ argument must NOT match file_write_etc (falls back to default 20).
+	execEv := makeEvent("/bin/cat", "/etc/hosts", "database", collector.EventTypeExecve)
+	execScore := engine.Calculate(execEv, validator.ClassNormal)
+	if execScore.SeverityScore != 20 {
+		t.Errorf("expected default severity 20 for execve /etc/, got %.0f", execScore.SeverityScore)
+	}
+}
+
 func BenchmarkEngine_Calculate(b *testing.B) {
 	dir := b.TempDir()
 	p := filepath.Join(dir, "policy.yaml")

@@ -171,6 +171,11 @@ func TestParser_ProcessKprobe(t *testing.T) {
 					Pid:    wrapperspb.UInt32(8888),
 					Binary: "/usr/sbin/sshd",
 				},
+				Args: []*tetragon.KprobeArgument{
+					{
+						Arg: &tetragon.KprobeArgument_StringArg{StringArg: "/etc/shadow"},
+					},
+				},
 			},
 		},
 	}
@@ -194,6 +199,9 @@ func TestParser_ProcessKprobe(t *testing.T) {
 	}
 	if event.ContainerID != "containerd://kprobe-container" {
 		t.Errorf("expected container ID containerd://kprobe-container, got %s", event.ContainerID)
+	}
+	if event.Arguments != "/etc/shadow" {
+		t.Errorf("expected arguments /etc/shadow, got %s", event.Arguments)
 	}
 }
 

@@ -369,12 +369,15 @@ func main() {
 					tracker.Track(event)
 					observability.DiscoveryEventsTotal.Inc()
 
-					if event.EventType != collector.EventTypeExecve {
+					if event.EventType != collector.EventTypeExecve &&
+						event.EventType != collector.EventTypeKprobe &&
+						event.EventType != collector.EventTypeFileAccess {
 						break
 					}
 					class := whitelist.Classify(event.ParentBinary, event.Binary)
 					observability.EventsClassifiedTotal.WithLabelValues(string(class)).Inc()
-					if class == validator.ClassNormal {
+					// ponytail: skip scoring for normal execve forks; kprobe/file-access always scores
+					if class == validator.ClassNormal && event.EventType == collector.EventTypeExecve {
 						break
 					}
 					score := riskEngine.Calculate(event, class)
@@ -403,12 +406,15 @@ func main() {
 
 				case discovery.ModeEnforcement:
 					// Full Stage 3 + 4 pipeline: classify → score → decide → contain/alert.
-					if event.EventType != collector.EventTypeExecve {
+					if event.EventType != collector.EventTypeExecve &&
+						event.EventType != collector.EventTypeKprobe &&
+						event.EventType != collector.EventTypeFileAccess {
 						break
 					}
 					class := whitelist.Classify(event.ParentBinary, event.Binary)
 					observability.EventsClassifiedTotal.WithLabelValues(string(class)).Inc()
-					if class == validator.ClassNormal {
+					// ponytail: skip scoring for normal execve forks; kprobe/file-access always scores
+					if class == validator.ClassNormal && event.EventType == collector.EventTypeExecve {
 						logger.Debug("event classified NORMAL",
 							zap.String("parent", event.ParentBinary),
 							zap.String("child", event.Binary),
