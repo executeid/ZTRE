@@ -81,7 +81,8 @@ func NewInClusterExecutor(logger *zap.Logger) (*Executor, error) {
 // CRITICAL: This operation NEVER terminates the pod or its processes (zero process kill).
 func (e *Executor) Quarantine(ctx context.Context, namespace, podName string, riskScore float64) error {
 	podKey := fmt.Sprintf("%s/%s", namespace, podName)
-	if _, already := e.quarantined.Load(podKey); already {
+	// ponytail: sync.Map atomic reservation prevents duplicate in-flight API patches across workers
+	if _, already := e.quarantined.LoadOrStore(podKey, struct{}{}); already {
 		e.logger.Debug("pod already in quarantine cache, skipping redundant API patch",
 			zap.String("namespace", namespace),
 			zap.String("pod", podName),
@@ -133,6 +134,7 @@ func (e *Executor) Quarantine(ctx context.Context, namespace, podName string, ri
 	latency := time.Since(startTime)
 
 	if err != nil {
+		e.quarantined.Delete(podKey)
 		observability.ApiErrorsTotal.Inc()
 		e.logger.Error("AUTOMATED CONTAINMENT FAILED",
 			zap.String("namespace", namespace),
@@ -144,7 +146,6 @@ func (e *Executor) Quarantine(ctx context.Context, namespace, podName string, ri
 		return fmt.Errorf("quarantine pod %s/%s failed after retries: %w", namespace, podName, err)
 	}
 
-	e.quarantined.Store(podKey, struct{}{})
 	observability.ContainmentActionsTotal.Inc()
 	e.logger.Info("AUTOMATED CONTAINMENT EXECUTED SUCCESSFULLY",
 		zap.String("action", "AUTO_CONTAINMENT"),

@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,7 +19,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
-	"sync/atomic"
 )
 
 func TestQuarantine_SuccessfulPatch(t *testing.T) {
@@ -245,5 +246,39 @@ func TestQuarantine_ConflictRetried(t *testing.T) {
 	}
 	if atomic.LoadInt32(&attempts) != 3 {
 		t.Fatalf("expected 3 attempts before conflict resolved, got %d", atomic.LoadInt32(&attempts))
+	}
+}
+
+func TestQuarantine_ConcurrentDeduplication(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "concurrent-dedup",
+			Namespace: "ztre-test",
+			Labels:    map[string]string{"app": "frontend"},
+		},
+	}
+	fakeClient := fake.NewSimpleClientset(pod)
+	var patchCount int32
+	fakeClient.PrependReactor("patch", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		atomic.AddInt32(&patchCount, 1)
+		time.Sleep(10 * time.Millisecond) // simulate network latency
+		return false, nil, nil
+	})
+
+	executor := NewExecutor(fakeClient, zap.NewNop())
+
+	const workers = 20
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			_ = executor.Quarantine(context.Background(), "ztre-test", "concurrent-dedup", 85.0)
+		}()
+	}
+	wg.Wait()
+
+	if atomic.LoadInt32(&patchCount) != 1 {
+		t.Fatalf("expected exactly 1 API patch call under concurrent quarantine, got %d", atomic.LoadInt32(&patchCount))
 	}
 }
