@@ -184,9 +184,12 @@ agent_since() {
 get_pod() {
   local app="$1"
   local pod
-  pod="$(kubectl get pod -n "$NS" -l "app=${app}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  pod="$(kubectl get pod -n "$NS" -l "app=${app}" --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
   if [ -z "$pod" ]; then
-    pod="$(kubectl get pod -n "$NS" "${app}" -o jsonpath='{.metadata.name}' 2>/dev/null || true)"
+    pod="$(kubectl get pod -n "$NS" "${app}" --field-selector=status.phase=Running -o jsonpath='{.metadata.name}' 2>/dev/null || true)"
+  fi
+  if [ -z "$pod" ]; then
+    pod="$(kubectl get pod -n "$NS" -l "app=${app}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
   fi
   echo "$pod"
 }

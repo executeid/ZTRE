@@ -154,12 +154,16 @@ async def generate_ai_triage_summary(payload: TetragonAlertPayload) -> str:
         "Summarize the attack vector and confirmation of socket isolation in exactly two concise sentences."
     )
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
     body = {"contents": [{"parts": [{"text": prompt}]}]}
 
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
-            resp = await client.post(url, json=body)
+            resp = await client.post(
+                url,
+                headers={"x-goog-api-key": GEMINI_API_KEY},
+                json=body,
+            )
             if resp.status_code == 200:
                 data = resp.json()
                 return data["candidates"][0]["content"]["parts"][0]["text"].strip()
@@ -188,6 +192,11 @@ async def remediate(
 
     payload = TetragonAlertPayload.model_validate_json(raw_body)
     now = time.time()
+
+    # Prune expired dedup entries
+    expired = [uid for uid, ts in _recent_quarantines.items() if (now - ts) >= ZTRE_DEDUP_TTL]
+    for uid in expired:
+        del _recent_quarantines[uid]
 
     # FR-2: Blast-radius namespace check
     if payload.workload.namespace in PROTECTED_NAMESPACES:

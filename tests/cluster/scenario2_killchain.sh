@@ -153,12 +153,15 @@ run_scenario2() {
   fi
   say "[SC2] Target workload pod: $web_pod"
 
-  # Step 2: Test reachability to NodePort endpoint
+  # Step 2: Reset agent deduplication cache and clear existing quarantine labels
+  reset_agent_and_wait vulnerable-web
+
+  # Step 3: Wait for Cilium identity convergence and HTTP connectivity restoration
   say "[SC2] Checking HTTP connectivity: http://$WORKER_IP:$NODEPORT/exec?cmd=id"
   local probe_ok=false
-  for attempt in 1 2 3; do
+  for attempt in $(seq 1 15); do
     local resp
-    resp=$(curl -s --connect-timeout 5 "http://$WORKER_IP:$NODEPORT/exec?cmd=id" 2>/dev/null || true)
+    resp=$(curl -s --connect-timeout 3 "http://$WORKER_IP:$NODEPORT/exec?cmd=id" 2>/dev/null || true)
     if [ -n "$resp" ]; then
       say "[SC2] Endpoint reachable (attempt $attempt): $(echo "$resp" | head -n 1)"
       probe_ok=true
@@ -169,9 +172,6 @@ run_scenario2() {
   if [ "$probe_ok" != "true" ]; then
     warn "[SC2] NodePort http://$WORKER_IP:$NODEPORT/exec?cmd=id not responding, continuing anyway..."
   fi
-
-  # Step 3: Reset agent deduplication cache and clear existing quarantine labels
-  reset_agent_and_wait vulnerable-web
 
   # Step 4: Verify starting clean state
   local init_quar

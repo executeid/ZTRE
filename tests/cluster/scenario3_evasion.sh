@@ -180,7 +180,7 @@ run_scenario3() {
   reset_agent_and_wait "$app_pod"
 
   pkill -f "python3.*4444" 2>/dev/null || true
-  (tcp_catcher 4444 /dev/null 10 >/dev/null 2>&1 &) || true
+  tcp_catcher 4444 /dev/null 10 >/dev/null 2>&1 &
   local listener_pid_3a=$!
   sleep 1
 
@@ -233,7 +233,7 @@ run_scenario3() {
   reset_agent_and_wait "$app_pod"
 
   pkill -f "python3.*4444" 2>/dev/null || true
-  (tcp_catcher 4444 /dev/null 10 >/dev/null 2>&1 &) || true
+  tcp_catcher 4444 /dev/null 10 >/dev/null 2>&1 &
   local listener_pid_3b=$!
   sleep 1
 
