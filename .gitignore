@@ -2,12 +2,21 @@
 /ztre-agent
 *.test
 *.out
+.pi/
 /.pi
+
+# Python
+__pycache__/
+*.pyc
+
 # Runtime data & snapshots
 /data/discovery/*.json
 /data/discovery/*.yaml
 !/data/discovery/.gitkeep
+
+# Documentation
 /doc
+/doc/
 
 # Evidence artifacts (screenshots, recordings, generated CSVs)
 /evidence
