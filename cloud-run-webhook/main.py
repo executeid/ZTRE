@@ -56,13 +56,31 @@ class TetragonAlertPayload(BaseModel):
     process: ProcessMetadata
 
 
+# Matches Go agent decision.Alert struct (sent by WebhookAlertSink)
+class AgentAlert(BaseModel):
+    event_id: str
+    timestamp: str
+    pod_name: str
+    namespace: str
+    parent_binary: str = ""
+    binary: str
+    arguments: str = ""
+    classification: str = ""
+    severity_score: float = 0.0
+    context_score: float = 0.0
+    asset_score: float = 0.0
+    total_risk_score: float = 0.0
+    action: str = ""
+    recommended_action: str = ""
+
+
 class RemediationAuditRecord(BaseModel):
     event_id: str
     status: str
     mode: str
     target_pod: str
     target_namespace: str
-    applied_label: str = "ztre.io/status=quarantined"
+    applied_label: str = "ztre/quarantine=true"
     network_policy: str = "ztre-zero-trust-quarantine"
     netpol_status: str
     forensic_summary: str
@@ -110,7 +128,7 @@ def enforce_quarantine(namespace: str, pod_name: str) -> str:
     core_v1.patch_namespaced_pod(
         name=pod_name,
         namespace=namespace,
-        body={"metadata": {"labels": {"ztre.io/status": "quarantined"}}},
+        body={"metadata": {"labels": {"ztre/quarantine": "true"}}},
     )
 
     policy = V1NetworkPolicy(
@@ -119,7 +137,7 @@ def enforce_quarantine(namespace: str, pod_name: str) -> str:
             labels={"app.kubernetes.io/managed-by": "ztre-serverless"},
         ),
         spec=V1NetworkPolicySpec(
-            pod_selector=V1LabelSelector(match_labels={"ztre.io/status": "quarantined"}),
+            pod_selector=V1LabelSelector(match_labels={"ztre/quarantine": "true"}),
             policy_types=["Ingress", "Egress"],
             ingress=[],
             egress=[],
@@ -135,21 +153,24 @@ def enforce_quarantine(namespace: str, pod_name: str) -> str:
         raise
 
 
-async def generate_ai_triage_summary(payload: TetragonAlertPayload) -> str:
+async def generate_ai_triage_summary(
+    binary: str, arguments: str, parent_binary: str,
+    pod_name: str, namespace: str, policy_name: str = "ztre-agent",
+) -> str:
     fallback = (
-        f"[Deterministic Triage] Process '{payload.process.binary}' "
-        f"(args: '{payload.process.arguments}') spawned by '{payload.process.parent_binary}' "
-        f"in pod '{payload.workload.pod_name}' (ns: '{payload.workload.namespace}') "
-        f"violated policy '{payload.policy_name}'. Pod isolated via zero-trust NetworkPolicy."
+        f"[Deterministic Triage] Process '{binary}' "
+        f"(args: '{arguments}') spawned by '{parent_binary}' "
+        f"in pod '{pod_name}' (ns: '{namespace}') "
+        f"violated policy '{policy_name}'. Pod isolated via zero-trust NetworkPolicy."
     )
 
     if not GEMINI_API_KEY:
         return fallback
 
     prompt = (
-        f"Security Alert: Process {payload.process.binary} ({payload.process.arguments}) "
-        f"spawned by {payload.process.parent_binary} inside pod {payload.workload.pod_name} "
-        f"(namespace: {payload.workload.namespace}) triggered Tetragon policy {payload.policy_name}. "
+        f"Security Alert: Process {binary} ({arguments}) "
+        f"spawned by {parent_binary} inside pod {pod_name} "
+        f"(namespace: {namespace}) triggered Tetragon policy {policy_name}. "
         f"The pod was quarantined with network policy ztre-zero-trust-quarantine. "
         "Summarize the attack vector and confirmation of socket isolation in exactly two concise sentences."
     )
@@ -223,7 +244,14 @@ async def remediate(
     )
 
     # FR-4: AI forensic summary
-    forensic_summary = await generate_ai_triage_summary(payload)
+    forensic_summary = await generate_ai_triage_summary(
+        binary=payload.process.binary,
+        arguments=payload.process.arguments,
+        parent_binary=payload.process.parent_binary,
+        pod_name=payload.workload.pod_name,
+        namespace=payload.workload.namespace,
+        policy_name=payload.policy_name,
+    )
 
     audit_record = RemediationAuditRecord(
         event_id=payload.event_id,
@@ -231,8 +259,6 @@ async def remediate(
         mode="DRY_RUN" if ZTRE_DRY_RUN else "LIVE_ENFORCEMENT",
         target_pod=payload.workload.pod_name,
         target_namespace=payload.workload.namespace,
-        applied_label="ztre.io/status=quarantined",
-        network_policy="ztre-zero-trust-quarantine",
         netpol_status=netpol_status,
         forensic_summary=forensic_summary,
         timestamp=datetime.now(timezone.utc).isoformat(),
@@ -240,5 +266,55 @@ async def remediate(
 
     return {
         "status": "quarantined",
+        "audit_record": audit_record.model_dump(),
+    }
+
+
+@app.post("/v1/agent-alert")
+async def agent_alert(request: Request):
+    """Receives alerts from ZTRE Go Agent WebhookAlertSink.
+    No HMAC required — agent sends plain JSON Alert structs.
+    Agent already performed containment; this endpoint adds AI triage + audit logging."""
+    raw_body = await request.body()
+    alert = AgentAlert.model_validate_json(raw_body)
+    now = time.time()
+
+    # Prune expired dedup entries
+    expired = [uid for uid, ts in _recent_quarantines.items() if (now - ts) >= ZTRE_DEDUP_TTL]
+    for uid in expired:
+        del _recent_quarantines[uid]
+
+    # Blast-radius namespace check
+    if alert.namespace in PROTECTED_NAMESPACES:
+        return {"status": "ignored", "reason": "protected_namespace"}
+
+    # Dedup by event_id (agent uses "podName-PID" as event_id)
+    if alert.event_id in _recent_quarantines:
+        if (now - _recent_quarantines[alert.event_id]) < ZTRE_DEDUP_TTL:
+            return {"status": "deduplicated", "event_id": alert.event_id}
+    _recent_quarantines[alert.event_id] = now
+
+    # AI forensic summary (agent already did containment, skip enforce_quarantine)
+    forensic_summary = await generate_ai_triage_summary(
+        binary=alert.binary,
+        arguments=alert.arguments,
+        parent_binary=alert.parent_binary,
+        pod_name=alert.pod_name,
+        namespace=alert.namespace,
+    )
+
+    audit_record = RemediationAuditRecord(
+        event_id=alert.event_id,
+        status="acknowledged",
+        mode="AGENT_WEBHOOK",
+        target_pod=alert.pod_name,
+        target_namespace=alert.namespace,
+        netpol_status="agent_handled",
+        forensic_summary=forensic_summary,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+    )
+
+    return {
+        "status": "acknowledged",
         "audit_record": audit_record.model_dump(),
     }

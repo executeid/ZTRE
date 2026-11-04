@@ -39,6 +39,8 @@ spec:
         - "-tetragon-socket=/var/run/tetragon/tetragon.sock"
         - "-metrics-addr=:9090"
         - "-debug"
+        # Uncomment and set URL to enable kernel-to-serverless path:
+        # - "-webhook-url=https://ztre-responder-XXXXX.run.app/v1/agent-alert"
         ports:
         - name: metrics
           containerPort: 9090
