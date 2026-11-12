@@ -26,8 +26,8 @@ spec:
                 operator: DoesNotExist
       containers:
       - name: ztre-agent
-        image: ztre-agent:v0.4.4
-        imagePullPolicy: Never  # Image loaded locally via ctr import
+        image: ghcr.io/executeid/ztre-agent:v0.4.4
+        imagePullPolicy: IfNotPresent
         securityContext:
           runAsUser: 0
           runAsGroup: 0
